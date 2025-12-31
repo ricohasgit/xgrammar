@@ -1293,8 +1293,15 @@ class GrammarCompiler::Impl {
   )
       : no_cache_compiler_(tokenizer_info, max_threads, crossing_cache_manager_),
         cache_enabled_(cache_enabled),
-        compile_cache_(static_cast<std::size_t>(max_memory_bytes / 3 * 2), Computer(*this)),
-        crossing_cache_manager_(static_cast<std::size_t>(max_memory_bytes / 3)) {
+        compile_cache_(
+            max_memory_bytes == -1 ? static_cast<std::size_t>(-1)
+                                   : static_cast<std::size_t>(max_memory_bytes / 3 * 2),
+            Computer(*this)
+        ),
+        crossing_cache_manager_(
+            max_memory_bytes == -1 ? static_cast<std::size_t>(-1)
+                                   : static_cast<std::size_t>(max_memory_bytes / 3)
+        ) {
     if (max_memory_bytes < -1) {
       XGRAMMAR_LOG(FATAL) << "Invalid max_memory_bytes: " << max_memory_bytes << ". "
                           << "It should be -1 (unlimited) or a non-negative integer.";
@@ -1445,16 +1452,20 @@ CompiledGrammar GrammarCompiler::Impl::CompileGrammar(
   return compile_cache_.Get(GrammarKey{ebnf_str, root_rule_name});
 }
 
-void GrammarCompiler::Impl::ClearCache() { compile_cache_.Clear(); }
+void GrammarCompiler::Impl::ClearCache() {
+  compile_cache_.Clear();
+  crossing_cache_manager_.ClearCache();
+}
 
 int64_t GrammarCompiler::Impl::GetCacheSizeBytes() const {
-  return static_cast<int64_t>(compile_cache_.MemorySize());
+  return static_cast<int64_t>(compile_cache_.MemorySize()) +
+         static_cast<int64_t>(MemorySize(crossing_cache_manager_));
 }
 
 int64_t GrammarCompiler::Impl::CacheLimitBytes() const {
   const auto size = compile_cache_.MaxMemorySize();
   if (size == compile_cache_.kUnlimitedSize) return -1;
-  return static_cast<int64_t>(size);
+  return static_cast<int64_t>(size) + static_cast<int64_t>(crossing_cache_manager_.GetMaxSize());
 }
 
 /******************* GrammarCompiler *******************/

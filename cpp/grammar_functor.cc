@@ -2063,7 +2063,8 @@ class CrossingCacheManagerImpl {
       const uint64_t& tokenizer_hash,
       AdaptiveTokenMask&& token_mask
   );
-  CrossingCacheManagerImpl(size_t max_cache_size = 10000) : max_cache_size_(max_cache_size) {}
+  CrossingCacheManagerImpl(size_t max_cache_size = CrossingCacheManager::kUnlimitedSize)
+      : max_cache_size_(max_cache_size) {}
 
   void ClearCache();
 
@@ -2111,7 +2112,8 @@ bool CrossingCacheManager::CrossingCacheManagerImpl::AddCache(
   current_cache_memory_size_ += MemorySize(token_mask);
 
   // If the cache exceeds the maximum size, evict the least recently used item.
-  while (current_cache_memory_size_ > static_cast<int64_t>(max_cache_memory_size_)) {
+  while ((!(max_cache_memory_size_ == kUnlimitedSize)) &&
+         current_cache_memory_size_ > static_cast<int64_t>(max_cache_memory_size_)) {
     auto last_cache_list_iterator = cache_list_.end();
     last_cache_list_iterator--;
     current_cache_memory_size_ -= MemorySize(last_cache_list_iterator->second);
@@ -2141,7 +2143,8 @@ bool CrossingCacheManager::CrossingCacheManagerImpl::AddCache(
   current_cache_memory_size_ += MemorySize(cache_list_.front().second);
 
   // If the cache exceeds the maximum size, evict the least recently used item.
-  while (current_cache_memory_size_ > static_cast<int64_t>(max_cache_memory_size_)) {
+  while ((!(max_cache_memory_size_ == kUnlimitedSize)) &&
+         current_cache_memory_size_ > static_cast<int64_t>(max_cache_memory_size_)) {
     auto last_cache_list_iterator = cache_list_.end();
     last_cache_list_iterator--;
     current_cache_memory_size_ -= MemorySize(last_cache_list_iterator->second);

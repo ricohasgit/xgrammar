@@ -398,6 +398,8 @@ class GrammarFSMHasher {
  */
 class CrossingCacheManager {
  public:
+  static const size_t kUnlimitedSize = static_cast<size_t>(-1);
+
   std::optional<AdaptiveTokenMask> GetCache(
       const uint64_t& fsm_hash, int32_t fsm_new_node_id, const uint64_t& tokenizer_hash
   );
@@ -413,7 +415,7 @@ class CrossingCacheManager {
       const uint64_t& tokenizer_hash,
       AdaptiveTokenMask&& token_mask
   );
-  CrossingCacheManager(size_t max_cache_memory_size = 1e7)
+  CrossingCacheManager(size_t max_cache_memory_size = kUnlimitedSize)
       : crossing_cache_manager_impl_(max_cache_memory_size) {}
 
   void ClearCache();
