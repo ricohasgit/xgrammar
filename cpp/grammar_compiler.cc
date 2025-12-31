@@ -960,7 +960,8 @@ class GrammarCompiler::Impl {
   )
       : no_cache_compiler_(tokenizer_info, max_threads),
         cache_enabled_(cache_enabled),
-        compile_cache_(static_cast<std::size_t>(max_memory_bytes), Computer(*this)) {
+        compile_cache_(static_cast<std::size_t>(max_memory_bytes / 3 * 2), Computer(*this)),
+        crossing_cache_manager_(static_cast<std::size_t>(max_memory_bytes / 3)) {
     if (max_memory_bytes < -1) {
       XGRAMMAR_LOG(FATAL) << "Invalid max_memory_bytes: " << max_memory_bytes << ". "
                           << "It should be -1 (unlimited) or a non-negative integer.";
@@ -1021,6 +1022,9 @@ class GrammarCompiler::Impl {
 
   /*! \brief The cache for compiled grammars. */
   ThreadSafeLRUCache<UnionKey, CompiledGrammar, Computer, SizeEstimator> compile_cache_;
+
+  /*! \brief The crossing cache manager for compiled grammars. */
+  CrossingCacheManager crossing_cache_manager_;
 };
 
 CompiledGrammar GrammarCompiler::Impl::Compute(const UnionKey& key) {
