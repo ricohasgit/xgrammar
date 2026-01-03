@@ -49,6 +49,20 @@ struct HashByMembers {
   }
 };
 
+/*!
+ * \brief Find the hash sum of several uint64_t args.
+ */
+inline void HashCombineBinary64Bits(uint64_t& seed, uint64_t value) {
+  seed ^= value + 0xc6a4a7935bd1e995 + (seed << 6) + (seed >> 2);
+}
+
+template <typename... Args>
+inline uint64_t HashCombine64Bits(Args... args) {
+  uint64_t seed = 0;
+  (..., HashCombineBinary64Bits(seed, args));
+  return seed;
+}
+
 }  // namespace xgrammar
 
 /*!

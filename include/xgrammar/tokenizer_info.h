@@ -38,6 +38,7 @@ class TokenizerInfo {
   VocabType GetVocabType() const;
   bool GetAddPrefixSpace() const;
   int GetVocabSize() const;
+  uint64_t GetTokenizerHash() const;
   const std::vector<std::string>& GetDecodedVocab() const;
   const std::vector<int32_t>& GetStopTokenIds() const;
   const std::vector<int32_t>& GetSpecialTokenIds() const;

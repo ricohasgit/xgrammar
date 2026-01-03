@@ -29,6 +29,7 @@ class TokenizerInfo::Impl {
   VocabType GetVocabType() const { return vocab_type_; }
   bool GetAddPrefixSpace() const { return add_prefix_space_; }
   int GetVocabSize() const { return vocab_size_; }
+  uint64_t GetTokenizerHash() const { return tokenizer_info_hash_; }
   const std::vector<std::string>& GetDecodedVocab() { return decoded_vocab_; }
   const std::vector<int32_t>& GetStopTokenIds() const { return stop_token_ids_; }
   const std::vector<int32_t>& GetSpecialTokenIds() const { return special_token_ids_; }
@@ -57,6 +58,8 @@ class TokenizerInfo::Impl {
   VocabType vocab_type_;
   /*! \brief The size of the vocabulary. */
   int vocab_size_;
+  /*! \brief The hash value of the tokenizer. */
+  uint64_t tokenizer_info_hash_;
   /*! \brief Whether to add prefix space. */
   bool add_prefix_space_;
 

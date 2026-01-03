@@ -275,14 +275,22 @@ TokenizerInfo::Impl::Impl(
       add_prefix_space_(add_prefix_space) {
   decoded_vocab_.reserve(encoded_vocab.size());
   sorted_decoded_vocab_.reserve(encoded_vocab.size());
+  tokenizer_info_hash_ = 0;
   for (int i = 0; i < static_cast<int>(encoded_vocab.size()); ++i) {
     const std::string& token = TokenDecoder::DecodeToken(encoded_vocab[i], vocab_type_);
     decoded_vocab_.push_back(token);
+    tokenizer_info_hash_ = HashCombine64Bits(tokenizer_info_hash_, std::hash<std::string>{}(token));
     if ((!stop_token_ids && DETECTION_STOP_TOKENS.count(token)) ||
         (stop_token_ids &&
          std::find(stop_token_ids->begin(), stop_token_ids->end(), i) != stop_token_ids->end())) {
+      tokenizer_info_hash_ =
+          HashCombine64Bits(tokenizer_info_hash_, std::hash<std::string>{}(token));
       stop_token_ids_.push_back(i);
     } else if (IsSpecialToken(token)) {
+      tokenizer_info_hash_ =
+          HashCombine64Bits(tokenizer_info_hash_, std::hash<std::string>{}(token));
+      tokenizer_info_hash_ =
+          HashCombine64Bits(tokenizer_info_hash_, std::hash<std::string>{}(token));
       special_token_ids_.push_back(i);
     } else {
       sorted_decoded_vocab_.push_back({i, token});
@@ -454,6 +462,7 @@ TokenizerInfo::TokenizerInfo(
       )) {}
 
 int TokenizerInfo::GetVocabSize() const { return pimpl_->GetVocabSize(); }
+uint64_t TokenizerInfo::GetTokenizerHash() const { return pimpl_->GetTokenizerHash(); }
 VocabType TokenizerInfo::GetVocabType() const { return pimpl_->GetVocabType(); }
 bool TokenizerInfo::GetAddPrefixSpace() const { return pimpl_->GetAddPrefixSpace(); }
 const std::vector<std::string>& TokenizerInfo::GetDecodedVocab() const {
