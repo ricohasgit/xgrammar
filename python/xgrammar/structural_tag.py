@@ -94,6 +94,9 @@ class RegexFormat(BaseModel):
     pattern: str
     """The regex pattern."""
 
+    excludes: List[str] = []
+    """Optional list of strings to exclude (exact match semantics)."""
+
 
 # ---------- Combinatorial Formats ----------
 

@@ -2391,18 +2391,20 @@ root ::= ((triggered_tags))
 
 # ---------- Regex Excludes Tests ----------
 
-# Note: Regex excludes work by excluding the EXACT string, not substrings.
-# This is different from any_text excludes which use substring matching.
+# Note: Regex excludes work using substring matching semantics.
+# Strings containing any excluded substring are rejected.
 
 test_strings_is_accepted_regex_excludes = [
-    # Basic matching - these match the pattern and are not in the exclude list
+    # Basic matching - these match the pattern and don't contain excluded substring
     ("abc", True),
     ("aac", True),
     ("abbc", True),
     ("ab", True),
-    # Exactly excluded pattern - 'bd' doesn't match [a-c]+ anyway
-    # Let's test with something that matches [a-c]+ but is excluded
-    ("cab", True),  # Not excluded
+    ("cab", True),
+    # Contains excluded substring "bac"
+    ("bac", False),
+    ("abac", False),  # Contains "bac"
+    ("bacb", False),  # Contains "bac"
     # Not matching the pattern at all
     ("xyz", False),  # Doesn't match [a-c]+
     ("123", False),  # Doesn't match [a-c]+
@@ -2411,34 +2413,34 @@ test_strings_is_accepted_regex_excludes = [
 
 @pytest.mark.parametrize("instance, is_accepted", test_strings_is_accepted_regex_excludes)
 def test_regex_with_excludes_basic(instance: str, is_accepted: bool):
-    """Test regex format with simple excludes (exact match semantics)"""
+    """Test regex format with simple excludes (substring matching semantics)"""
     stag_format = {
         "type": "regex",
         "pattern": "[a-c]+",
-        "excludes": ["bac"],  # Excludes exactly "bac"
+        "excludes": ["bac"],  # Excludes strings containing "bac"
     }
 
     check_stag_with_instance(stag_format, instance, is_accepted)
 
 
-test_strings_is_accepted_regex_excludes_exact = [
-    # Should match - not exactly the excluded strings
+test_strings_is_accepted_regex_excludes_substring = [
+    # Should match - don't contain excluded substrings
     ("hello", True),
     ("world", True),
     ("test", True),
-    # Exactly excluded patterns (exact match semantics)
-    ("foo", False),  # Exactly 'foo' - excluded
-    ("bar", False),  # Exactly 'bar' - excluded
-    # Strings containing excluded patterns are still accepted (exact match, not substring)
-    ("foobar", True),  # Not exactly 'foo' or 'bar'
-    ("testfoo", True),  # Not exactly 'foo' or 'bar'
-    ("bartest", True),  # Not exactly 'foo' or 'bar'
+    ("baz", True),  # Doesn't contain "foo" or "bar"
+    # Contains excluded patterns - rejected (substring matching)
+    ("foo", False),  # Contains 'foo'
+    ("bar", False),  # Contains 'bar'
+    ("foobar", False),  # Contains both 'foo' and 'bar'
+    ("testfoo", False),  # Contains 'foo'
+    ("bartest", False),  # Contains 'bar'
 ]
 
 
-@pytest.mark.parametrize("instance, is_accepted", test_strings_is_accepted_regex_excludes_exact)
-def test_regex_with_excludes_exact(instance: str, is_accepted: bool):
-    """Test regex format excludes use exact match semantics"""
+@pytest.mark.parametrize("instance, is_accepted", test_strings_is_accepted_regex_excludes_substring)
+def test_regex_with_excludes_substring(instance: str, is_accepted: bool):
+    """Test regex format excludes use substring matching semantics"""
     stag_format = {
         "type": "regex",
         "pattern": "[a-z]+",
@@ -2449,19 +2451,21 @@ def test_regex_with_excludes_exact(instance: str, is_accepted: bool):
 
 
 test_strings_is_accepted_regex_excludes_single = [
-    # Exact match - excluded
+    # Contains "bad" - excluded
     ("bad", False),
+    ("badword", False),  # Contains "bad"
+    ("wordbad", False),  # Contains "bad"
+    ("verybadword", False),  # Contains "bad"
     # Other valid strings - not excluded
     ("good", True),
-    ("badword", True),  # Not exactly "bad"
-    ("wordbad", True),  # Not exactly "bad"
-    ("verybadword", True),  # Not exactly "bad"
+    ("bade", False),  # Contains "bad"
+    ("badge", False),  # Contains "bad"
 ]
 
 
 @pytest.mark.parametrize("instance, is_accepted", test_strings_is_accepted_regex_excludes_single)
 def test_regex_with_excludes_single(instance: str, is_accepted: bool):
-    """Test regex excludes with a single excluded string (exact match)"""
+    """Test regex excludes with a single excluded string (substring matching)"""
     stag_format = {
         "type": "regex",
         "pattern": "[a-z]+",
