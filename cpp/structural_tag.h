@@ -78,7 +78,9 @@ struct GrammarFormat {
 struct RegexFormat {
   static constexpr const char* type = "regex";
   std::string pattern;
-  RegexFormat(std::string pattern) : pattern(std::move(pattern)) {}
+  std::vector<std::string> excluded_strs;
+  RegexFormat(std::string pattern, std::vector<std::string> excluded_strs = {})
+      : pattern(std::move(pattern)), excluded_strs(std::move(excluded_strs)) {}
 };
 
 struct AnyTextFormat {

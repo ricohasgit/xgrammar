@@ -11,9 +11,11 @@
 #include <string_view>
 #include <utility>
 
+#include "fsm_builder.h"
 #include "grammar_functor.h"
 #include "grammar_impl.h"
 #include "json_schema_converter.h"
+#include "regex_converter.h"
 #include "support/logging.h"
 #include "support/recursion_guard.h"
 #include "support/utils.h"
@@ -255,7 +257,23 @@ Result<RegexFormat, ISTError> StructuralTagParser::ParseRegexFormat(const picojs
       pattern_it->second.get<std::string>().empty()) {
     return ResultErr<ISTError>("Regex format must have a pattern field with a non-empty string");
   }
-  return ResultOk<RegexFormat>(pattern_it->second.get<std::string>());
+  // excludes is optional.
+  std::vector<std::string> excluded_strs;
+  auto excluded_strs_it = obj.find("excludes");
+  if (excluded_strs_it != obj.end()) {
+    if (!excluded_strs_it->second.is<picojson::array>()) {
+      return ResultErr<ISTError>("Regex format's excludes field must be an array");
+    }
+    const auto& excluded_strs_array = excluded_strs_it->second.get<picojson::array>();
+    excluded_strs.reserve(excluded_strs_array.size());
+    for (const auto& excluded_str : excluded_strs_array) {
+      if (!excluded_str.is<std::string>() || excluded_str.get<std::string>().empty()) {
+        return ResultErr<ISTError>("Regex format's excludes array must contain non-empty strings");
+      }
+      excluded_strs.push_back(excluded_str.get<std::string>());
+    }
+  }
+  return ResultOk<RegexFormat>(pattern_it->second.get<std::string>(), std::move(excluded_strs));
 }
 
 Result<SequenceFormat, ISTError> StructuralTagParser::ParseSequenceFormat(
@@ -796,7 +814,14 @@ std::string FormatFingerprinter::VisitSub(const GrammarFormat& format) {
 }
 
 std::string FormatFingerprinter::VisitSub(const RegexFormat& format) {
-  return std::string("RX:") + format.pattern;
+  std::string result = std::string("RX:") + format.pattern;
+  if (!format.excluded_strs.empty()) {
+    result += ":X:";
+    for (const auto& s : format.excluded_strs) {
+      result += s + "|";
+    }
+  }
+  return result;
 }
 
 std::string FormatFingerprinter::VisitSub(const SequenceFormat& format) {
@@ -956,9 +981,118 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const GrammarForma
 }
 
 Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const RegexFormat& format) {
-  auto sub_grammar = Grammar::FromRegex(format.pattern);
-  auto added_root_rule_id = SubGrammarAdder().Apply(&grammar_builder_, sub_grammar);
-  return ResultOk(added_root_rule_id);
+  // If no excludes, use the simple path
+  if (format.excluded_strs.empty()) {
+    auto sub_grammar = Grammar::FromRegex(format.pattern);
+    auto added_root_rule_id = SubGrammarAdder().Apply(&grammar_builder_, sub_grammar);
+    return ResultOk(added_root_rule_id);
+  }
+
+  // Build FSM from the regex pattern
+  auto regex_fsm_result = RegexFSMBuilder::Build(format.pattern);
+  if (regex_fsm_result.IsErr()) {
+    return ResultErr<ISTError>(
+        std::string("Failed to build FSM from regex pattern: ") +
+        std::move(regex_fsm_result).UnwrapErr().what()
+    );
+  }
+  auto regex_fsm = std::move(regex_fsm_result).Unwrap();
+
+  // Build FSM for excluded strings (union of all literal string FSMs)
+  std::vector<FSMWithStartEnd> exclude_fsms;
+  exclude_fsms.reserve(format.excluded_strs.size());
+  for (const auto& exclude_str : format.excluded_strs) {
+    // Build a simple FSM that matches the literal string
+    FSM literal_fsm(1);
+    int current_state = 0;
+    for (char c : exclude_str) {
+      int next_state = literal_fsm.AddState();
+      literal_fsm.AddEdge(current_state, next_state, static_cast<uint8_t>(c), static_cast<uint8_t>(c)
+      );
+      current_state = next_state;
+    }
+    std::vector<bool> ends(literal_fsm.NumStates(), false);
+    ends[current_state] = true;
+    exclude_fsms.push_back(FSMWithStartEnd(literal_fsm, 0, ends, true));
+  }
+
+  // Union of all excluded FSMs
+  auto exclude_union = FSMWithStartEnd::Union(exclude_fsms);
+
+  // Complement of the excluded FSM (matches everything except excluded strings)
+  auto exclude_complement_result = exclude_union.Not();
+  if (exclude_complement_result.IsErr()) {
+    return ResultErr<ISTError>(
+        std::string("Failed to compute complement of excluded patterns: ") +
+        std::move(exclude_complement_result).UnwrapErr().what()
+    );
+  }
+  auto exclude_complement = std::move(exclude_complement_result).Unwrap();
+
+  // Intersect regex FSM with complement of excludes
+  auto result_fsm_result = FSMWithStartEnd::Intersect(regex_fsm, exclude_complement);
+  if (result_fsm_result.IsErr()) {
+    return ResultErr<ISTError>(
+        std::string("Failed to compute intersection for regex with excludes: ") +
+        std::move(result_fsm_result).UnwrapErr().what()
+    );
+  }
+  auto result_fsm = std::move(result_fsm_result).Unwrap();
+
+  // Convert the resulting FSM to a grammar
+  // We need to build the grammar from the FSM edges
+  // First, create rules for each state transition
+  int num_states = result_fsm.NumStates();
+  if (num_states == 0) {
+    // Empty FSM - nothing matches
+    return ResultErr<ISTError>("Regex with excludes results in empty language (nothing matches)");
+  }
+
+  // Build choice expressions for each state
+  std::vector<int32_t> state_rule_ids(num_states, -1);
+
+  // First pass: create empty rules for all states
+  for (int state = 0; state < num_states; ++state) {
+    state_rule_ids[state] = grammar_builder_.AddEmptyRuleWithHint("regex_state");
+  }
+
+  // Second pass: build rule bodies
+  for (int state = 0; state < num_states; ++state) {
+    std::vector<int32_t> choice_seqs;
+
+    // If this is an end state, add empty string as an option
+    if (result_fsm.IsEndState(state)) {
+      choice_seqs.push_back(grammar_builder_.AddSequence({grammar_builder_.AddEmptyStr()}));
+    }
+
+    // Add transitions
+    const auto& edges = result_fsm.GetFsm().GetEdges(state);
+    for (const auto& edge : edges) {
+      if (edge.IsCharRange()) {
+        // Character range edge
+        std::vector<GrammarBuilder::CharacterClassElement> char_class = {{edge.min, edge.max}};
+        int32_t char_expr = grammar_builder_.AddCharacterClass(char_class);
+        int32_t target_ref = grammar_builder_.AddRuleRef(state_rule_ids[edge.target]);
+        choice_seqs.push_back(grammar_builder_.AddSequence({char_expr, target_ref}));
+      }
+      // Note: We ignore epsilon and rule ref edges as they shouldn't appear in a leaf FSM
+    }
+
+    if (choice_seqs.empty()) {
+      // Dead end state - should not happen for valid FSM but handle gracefully
+      grammar_builder_.UpdateRuleBody(
+          state_rule_ids[state],
+          grammar_builder_.AddChoices({grammar_builder_.AddSequence({grammar_builder_.AddEmptyStr()})
+          })
+      );
+    } else {
+      grammar_builder_.UpdateRuleBody(state_rule_ids[state], grammar_builder_.AddChoices(choice_seqs)
+      );
+    }
+  }
+
+  // The start state rule is our result
+  return ResultOk(state_rule_ids[result_fsm.GetStart()]);
 }
 
 Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const AnyTextFormat& format) {
