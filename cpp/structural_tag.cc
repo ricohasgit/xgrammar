@@ -760,118 +760,228 @@ std::optional<ISTError> StructuralTagAnalyzer::VisitSub(TagsWithSeparatorFormat*
 
 /*!
  * \brief Compute a fingerprint string for a Format to enable deduplication.
- * Formats with identical fingerprints can reuse the same grammar rule.
+ * The fingerprint is the canonical JSON serialization of the format (including
+ * analyzer-derived fields), ensuring it stays aligned with the spec.
  */
 class FormatFingerprinter {
  public:
   static std::string Compute(const Format& format);
 
  private:
-  std::string ComputeImpl(const Format& format);
-  std::string VisitSub(const ConstStringFormat& format);
-  std::string VisitSub(const JSONSchemaFormat& format);
-  std::string VisitSub(const QwenXmlParameterFormat& format);
-  std::string VisitSub(const AnyTextFormat& format);
-  std::string VisitSub(const GrammarFormat& format);
-  std::string VisitSub(const RegexFormat& format);
-  std::string VisitSub(const SequenceFormat& format);
-  std::string VisitSub(const OrFormat& format);
-  std::string VisitSub(const TagFormat& format);
-  std::string VisitSub(const TriggeredTagsFormat& format);
-  std::string VisitSub(const TagsWithSeparatorFormat& format);
+  explicit FormatFingerprinter(bool include_internal_fields)
+      : include_internal_fields_(include_internal_fields) {}
+
+  picojson::value Visit(const Format& format);
+  picojson::value VisitSub(const ConstStringFormat& format);
+  picojson::value VisitSub(const JSONSchemaFormat& format);
+  picojson::value VisitSub(const QwenXmlParameterFormat& format);
+  picojson::value VisitSub(const AnyTextFormat& format);
+  picojson::value VisitSub(const GrammarFormat& format);
+  picojson::value VisitSub(const RegexFormat& format);
+  picojson::value VisitSub(const SequenceFormat& format);
+  picojson::value VisitSub(const OrFormat& format);
+  picojson::value VisitSub(const TagFormat& format);
+  picojson::value VisitSub(const TriggeredTagsFormat& format);
+  picojson::value VisitSub(const TagsWithSeparatorFormat& format);
+
+  picojson::value ParseJSONOrString(const std::string& json_str);
+
+  bool include_internal_fields_;
 };
 
 std::string FormatFingerprinter::Compute(const Format& format) {
-  return FormatFingerprinter().ComputeImpl(format);
+  // Include analyzer-derived internal fields so the cache reflects grammar semantics.
+  picojson::value json = FormatFingerprinter(true).Visit(format);
+  return json.serialize(false);
 }
 
-std::string FormatFingerprinter::ComputeImpl(const Format& format) {
-  return std::visit([&](auto&& arg) -> std::string { return VisitSub(arg); }, format);
+picojson::value FormatFingerprinter::ParseJSONOrString(const std::string& json_str) {
+  picojson::value value;
+  std::string err = picojson::parse(value, json_str);
+  if (!err.empty()) {
+    // Fallback to string if parsing fails (should not happen for validated inputs)
+    return picojson::value(json_str);
+  }
+  return value;
 }
 
-std::string FormatFingerprinter::VisitSub(const ConstStringFormat& format) {
-  return std::string("CS:") + format.value;
+picojson::value FormatFingerprinter::Visit(const Format& format) {
+  return std::visit([&](auto&& arg) -> picojson::value { return VisitSub(arg); }, format);
 }
 
-std::string FormatFingerprinter::VisitSub(const JSONSchemaFormat& format) {
-  return std::string("JS:") + format.json_schema;
+picojson::value FormatFingerprinter::VisitSub(const ConstStringFormat& format) {
+  picojson::object obj;
+  obj["type"] = picojson::value(ConstStringFormat::type);
+  obj["value"] = picojson::value(format.value);
+  return picojson::value(obj);
 }
 
-std::string FormatFingerprinter::VisitSub(const QwenXmlParameterFormat& format) {
-  return std::string("QX:") + format.xml_schema;
+picojson::value FormatFingerprinter::VisitSub(const JSONSchemaFormat& format) {
+  picojson::object obj;
+  obj["type"] = picojson::value(JSONSchemaFormat::type);
+  obj["json_schema"] = ParseJSONOrString(format.json_schema);
+  return picojson::value(obj);
 }
 
-std::string FormatFingerprinter::VisitSub(const AnyTextFormat& format) {
-  std::string result = "AT:";
+picojson::value FormatFingerprinter::VisitSub(const QwenXmlParameterFormat& format) {
+  picojson::object obj;
+  obj["type"] = picojson::value(QwenXmlParameterFormat::type);
+  obj["xml_schema"] = picojson::value(format.xml_schema);
+  return picojson::value(obj);
+}
+
+picojson::value FormatFingerprinter::VisitSub(const AnyTextFormat& format) {
+  picojson::object obj;
+  obj["type"] = picojson::value(AnyTextFormat::type);
+  picojson::array excluded;
+  excluded.reserve(format.excluded_strs.size());
   for (const auto& s : format.excluded_strs) {
-    result += s + "|";
+    excluded.push_back(picojson::value(s));
   }
-  // Include detected end strings in the fingerprint as they affect the grammar
-  result += "E:";
-  for (const auto& s : format.detected_end_strs_) {
-    result += s + "|";
-  }
-  return result;
-}
-
-std::string FormatFingerprinter::VisitSub(const GrammarFormat& format) {
-  return std::string("GR:") + format.grammar;
-}
-
-std::string FormatFingerprinter::VisitSub(const RegexFormat& format) {
-  std::string result = std::string("RX:") + format.pattern;
-  if (!format.excluded_strs.empty()) {
-    result += ":X:";
-    for (const auto& s : format.excluded_strs) {
-      result += s + "|";
+  obj["excluded_strs"] = picojson::value(excluded);
+  if (include_internal_fields_) {
+    picojson::array detected;
+    detected.reserve(format.detected_end_strs_.size());
+    for (const auto& s : format.detected_end_strs_) {
+      detected.push_back(picojson::value(s));
     }
+    obj["__detected_end_strs"] = picojson::value(detected);
   }
-  return result;
+  return picojson::value(obj);
 }
 
-std::string FormatFingerprinter::VisitSub(const SequenceFormat& format) {
-  std::string result = "SQ[";
+picojson::value FormatFingerprinter::VisitSub(const GrammarFormat& format) {
+  picojson::object obj;
+  obj["type"] = picojson::value(GrammarFormat::type);
+  obj["grammar"] = picojson::value(format.grammar);
+  return picojson::value(obj);
+}
+
+picojson::value FormatFingerprinter::VisitSub(const RegexFormat& format) {
+  picojson::object obj;
+  obj["type"] = picojson::value(RegexFormat::type);
+  obj["pattern"] = picojson::value(format.pattern);
+  picojson::array excludes;
+  excludes.reserve(format.excluded_strs.size());
+  for (const auto& s : format.excluded_strs) {
+    excludes.push_back(picojson::value(s));
+  }
+  obj["excludes"] = picojson::value(excludes);
+  return picojson::value(obj);
+}
+
+picojson::value FormatFingerprinter::VisitSub(const SequenceFormat& format) {
+  picojson::object obj;
+  obj["type"] = picojson::value(SequenceFormat::type);
+  picojson::array elements;
+  elements.reserve(format.elements.size());
   for (const auto& element : format.elements) {
-    result += ComputeImpl(element) + ",";
+    elements.push_back(Visit(element));
   }
-  result += "]";
-  return result;
+  obj["elements"] = picojson::value(elements);
+  if (include_internal_fields_) {
+    obj["__is_unlimited"] = picojson::value(format.is_unlimited_);
+  }
+  return picojson::value(obj);
 }
 
-std::string FormatFingerprinter::VisitSub(const OrFormat& format) {
-  std::string result = "OR[";
+picojson::value FormatFingerprinter::VisitSub(const OrFormat& format) {
+  picojson::object obj;
+  obj["type"] = picojson::value(OrFormat::type);
+  picojson::array elements;
+  elements.reserve(format.elements.size());
   for (const auto& element : format.elements) {
-    result += ComputeImpl(element) + ",";
+    elements.push_back(Visit(element));
   }
-  result += "]";
-  return result;
+  obj["elements"] = picojson::value(elements);
+  if (include_internal_fields_) {
+    obj["__is_unlimited"] = picojson::value(format.is_unlimited_);
+  }
+  return picojson::value(obj);
 }
 
-std::string FormatFingerprinter::VisitSub(const TagFormat& format) {
-  std::string result = "TG:" + format.begin + ":{";
-  result += ComputeImpl(*format.content);
-  result += "}:";
-  for (const auto& end_str : format.end) {
-    result += end_str + "|";
+picojson::value FormatFingerprinter::VisitSub(const TagFormat& format) {
+  picojson::object obj;
+  obj["type"] = picojson::value(TagFormat::type);
+  obj["begin"] = picojson::value(format.begin);
+  obj["content"] = Visit(*format.content);
+  if (format.end.size() == 1) {
+    obj["end"] = picojson::value(format.end[0]);
+  } else {
+    picojson::array ends;
+    ends.reserve(format.end.size());
+    for (const auto& end_str : format.end) {
+      ends.push_back(picojson::value(end_str));
+    }
+    obj["end"] = picojson::value(ends);
   }
-  return result;
+  return picojson::value(obj);
 }
 
-std::string FormatFingerprinter::VisitSub(const TriggeredTagsFormat& format) {
-  // TriggeredTags are complex and rarely duplicated, use a simple hash
-  std::string result = "TT:";
+picojson::value FormatFingerprinter::VisitSub(const TriggeredTagsFormat& format) {
+  picojson::object obj;
+  obj["type"] = picojson::value(TriggeredTagsFormat::type);
+
+  picojson::array triggers;
+  triggers.reserve(format.triggers.size());
   for (const auto& trigger : format.triggers) {
-    result += trigger + ",";
+    triggers.push_back(picojson::value(trigger));
   }
-  result += ":";
-  result += std::to_string(format.at_least_one) + "," + std::to_string(format.stop_after_first);
-  return result;
+  obj["triggers"] = picojson::value(triggers);
+
+  picojson::array tags;
+  tags.reserve(format.tags.size());
+  for (const auto& tag : format.tags) {
+    tags.push_back(VisitSub(tag));
+  }
+  obj["tags"] = picojson::value(tags);
+
+  picojson::array excludes;
+  excludes.reserve(format.excludes.size());
+  for (const auto& ex : format.excludes) {
+    excludes.push_back(picojson::value(ex));
+  }
+  obj["excludes"] = picojson::value(excludes);
+
+  obj["at_least_one"] = picojson::value(format.at_least_one);
+  obj["stop_after_first"] = picojson::value(format.stop_after_first);
+
+  if (include_internal_fields_) {
+    picojson::array detected;
+    detected.reserve(format.detected_end_strs_.size());
+    for (const auto& s : format.detected_end_strs_) {
+      detected.push_back(picojson::value(s));
+    }
+    obj["__detected_end_strs"] = picojson::value(detected);
+  }
+
+  return picojson::value(obj);
 }
 
-std::string FormatFingerprinter::VisitSub(const TagsWithSeparatorFormat& format) {
-  std::string result = "TS:" + format.separator + ":";
-  result += std::to_string(format.at_least_one) + "," + std::to_string(format.stop_after_first);
-  return result;
+picojson::value FormatFingerprinter::VisitSub(const TagsWithSeparatorFormat& format) {
+  picojson::object obj;
+  obj["type"] = picojson::value(TagsWithSeparatorFormat::type);
+
+  picojson::array tags;
+  tags.reserve(format.tags.size());
+  for (const auto& tag : format.tags) {
+    tags.push_back(VisitSub(tag));
+  }
+  obj["tags"] = picojson::value(tags);
+  obj["separator"] = picojson::value(format.separator);
+  obj["at_least_one"] = picojson::value(format.at_least_one);
+  obj["stop_after_first"] = picojson::value(format.stop_after_first);
+
+  if (include_internal_fields_) {
+    picojson::array detected;
+    detected.reserve(format.detected_end_strs_.size());
+    for (const auto& s : format.detected_end_strs_) {
+      detected.push_back(picojson::value(s));
+    }
+    obj["__detected_end_strs"] = picojson::value(detected);
+  }
+
+  return picojson::value(obj);
 }
 
 /************** StructuralTag to Grammar Converter **************/
