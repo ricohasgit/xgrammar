@@ -21,6 +21,7 @@ option(XGRAMMAR_ENABLE_CPPTRACE
 )
 option(XGRAMMAR_ENABLE_COVERAGE "Enable code coverage with gcov" OFF)
 option(XGRAMMAR_ENABLE_INTERNAL_CHECK "Enable internal checks" OFF)
+option(XGRAMMAR_BUILD_BENCHMARKS "Build optional benchmark binaries" OFF)
 
 set(XGRAMMAR_CUDA_ARCHITECTURES
     native
@@ -101,6 +102,12 @@ install(
 if(XGRAMMAR_BUILD_PYTHON_BINDINGS)
   add_subdirectory(${PROJECT_SOURCE_DIR}/cpp/nanobind)
   install(TARGETS xgrammar_bindings DESTINATION .)
+endif()
+
+if(XGRAMMAR_BUILD_BENCHMARKS)
+  add_executable(regex_excludes_bench examples/benchmark/regex_excludes.cc)
+  target_include_directories(regex_excludes_bench PRIVATE ${PROJECT_SOURCE_DIR}/cpp)
+  target_link_libraries(regex_excludes_bench PRIVATE xgrammar)
 endif()
 
 if(XGRAMMAR_BUILD_CXX_TESTS)

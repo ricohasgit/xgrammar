@@ -1003,6 +1003,10 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const RegexFormat&
   }
   auto regex_fsm = std::move(regex_fsm_result).Unwrap();
 
+  // Shrink the regex automaton to reduce cross-product size.
+  regex_fsm = regex_fsm.SimplifyEpsilon();
+  regex_fsm = regex_fsm.MergeEquivalentSuccessors();
+
   // Use TrieFSMBuilder to build an Aho-Corasick FSM for excludes.
   // We pass empty patterns list, and excluded patterns will be built as "dead" states.
   // add_back_edges=true enables proper Aho-Corasick back edges.
@@ -1054,6 +1058,9 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const RegexFormat&
     );
   }
   auto result_fsm = std::move(result_fsm_result).Unwrap();
+
+  // The intersection is a DFA; merge equivalent successors to reduce rule count before lowering.
+  result_fsm = result_fsm.MergeEquivalentSuccessors();
 
   // Merge consecutive edges with the same target in the result FSM
   FSM& result_fsm_ref = result_fsm.GetFsm();
