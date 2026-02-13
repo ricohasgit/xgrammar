@@ -1,6 +1,6 @@
 [project]
 name = "xgrammar"
-version = "0.1.29"
+version = "0.1.31"
 description = "Efficient, Flexible and Portable Structured Generation"
 authors = [{ name = "MLC Team" }]
 readme = "README.md"
@@ -19,7 +19,6 @@ dependencies = [
   "torch>=1.10.0",
   "transformers>=4.38.0",
   "triton; platform_system == 'Linux' and platform_machine == 'x86_64'",
-  "mlx-lm; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "numpy",
   "typing-extensions>=4.9.0",
 ]
@@ -39,6 +38,7 @@ test = [
   # https://github.com/huggingface/transformers/issues/36906
   "transformers<4.50.0; platform_system == 'Darwin'",
 ]
+metal = ["mlx-lm; platform_system == 'Darwin' and platform_machine == 'arm64'"]
 
 [build-system]
 requires = ["scikit-build-core>=0.10.0", "nanobind==2.5.0"]
@@ -142,9 +142,7 @@ skip = [
   "cp36-*",
   "cp37-*",
   "cp38-*",
-  "pp*",
   "*musllinux*",
-  "cp313-manylinux_aarch64",
   "cp313-macosx_x86_64",
 ] # pypy doesn't play nice with pybind11
 build-frontend = "build[uv]"

@@ -132,7 +132,7 @@ basic_boolean ::= (("true") | ("false"))
 basic_null ::= (("null"))
 basic_array ::= (("[" [ \n\t]* basic_any basic_array_1 [ \n\t]* "]") | ("[" [ \n\t]* "]"))
 basic_object ::= (("{" [ \n\t]* basic_string [ \n\t]* ":" [ \n\t]* basic_any basic_object_1 [ \n\t]* "}") | ("{" [ \n\t]* "}"))
-root ::= (("{" [ \n\t]* "\"a\"" [ \n\t]* ":" [ \n\t]* basic_string [ \n\t]* "}") | ("{" [ \n\t]* "}"))
+root_0 ::= (("{" [ \n\t]* "\"a\"" [ \n\t]* ":" [ \n\t]* basic_string [ \n\t]* "}") | ("{" [ \n\t]* "}"))
 basic_integer_1 ::= ("" | ("-"))
 basic_number_1 ::= ("" | ("-"))
 basic_number_2 ::= (([0-9] basic_number_2) | ([0-9]))
@@ -143,7 +143,7 @@ basic_number_6 ::= ("" | ([eE] basic_number_4 basic_number_5))
 basic_array_1 ::= ("" | ([ \n\t]* "," [ \n\t]* basic_any basic_array_1))
 basic_object_1 ::= ("" | ([ \n\t]* "," [ \n\t]* basic_string [ \n\t]* ":" [ \n\t]* basic_any basic_object_1))
 basic_number_7 ::= (("0") | ([1-9] [0-9]*))
-root_1 ::= ((root))
+root ::= ((root_0))
 """,
     )
 ]
@@ -178,12 +178,6 @@ qwen_parameter_xml_stag_grammar = [
         },
         r"""basic_escape ::= (([\"\\/bfnrt]) | ("u" [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9]))
 basic_string_sub ::= (("\"") | ([^\0-\x1f\"\\\r\n] basic_string_sub) | ("\\" basic_escape basic_string_sub)) (=([ \n\t]* [,}\]:]))
-xml_escape ::= (([\"\\/bfnrt]) | ("u" [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9] [A-Fa-f0-9]))
-xml_entity ::= (("&lt;") | ("&gt;") | ("&amp;") | ("&quot;") | ("&apos;"))
-xml_string ::= ("" | ([^<>&\0-\x1f\\\r\n] xml_string) | ("\\" xml_escape xml_string) | (xml_entity xml_string)) (=([ \n\t]*))
-xml_variable_name ::= (([a-zA-Z_] [a-zA-Z0-9_]*))
-xml_string_0 ::= ((xml_string))
-xml_any ::= ((basic_number) | (xml_string) | (basic_boolean) | (basic_null) | (basic_array) | (basic_object))
 basic_any ::= ((basic_number) | (basic_string) | (basic_boolean) | (basic_null) | (basic_array) | (basic_object))
 basic_integer ::= (("0") | (basic_integer_1 [1-9] [0-9]*))
 basic_number ::= ((basic_number_1 basic_number_7 basic_number_3 basic_number_6))
@@ -192,9 +186,18 @@ basic_boolean ::= (("true") | ("false"))
 basic_null ::= (("null"))
 basic_array ::= (("[" [ \n\t]* basic_any basic_array_1 [ \n\t]* "]") | ("[" [ \n\t]* "]"))
 basic_object ::= (("{" [ \n\t]* basic_string [ \n\t]* ":" [ \n\t]* basic_any basic_object_1 [ \n\t]* "}") | ("{" [ \n\t]* "}"))
+xml_string ::= TagDispatch(
+  stop_eos=true,
+  stop_str=(),
+  loop_after_dispatch=false,
+  excludes=("</parameter>")
+)
+xml_any ::= ((xml_string) | (basic_array) | (basic_object))
+xml_object ::= (("<parameter=" xml_variable_name ">" [ \n\t]* xml_any [ \n\t]* "</parameter>" xml_object_1) | ([ \n\t]*))
+xml_variable_name ::= (([a-zA-Z_] [a-zA-Z0-9_]*))
 root_prop_1 ::= (("0") | (root_prop_1_1 [1-9] [0-9]*))
-root_part_0 ::= (([ \n\t]* "<parameter=age>" [ \n\t]* root_prop_1 [ \n\t]* "</parameter>"))
-root ::= (([ \n\t]* "<parameter=name>" [ \n\t]* xml_string_0 [ \n\t]* "</parameter>" root_part_0))
+root_part_0 ::= (("<parameter=age>" [ \n\t]* root_prop_1 [ \n\t]* "</parameter>"))
+root_0 ::= (("<parameter=name>" [ \n\t]* xml_string [ \n\t]* "</parameter>" root_part_0))
 basic_integer_1 ::= ("" | ("-"))
 basic_number_1 ::= ("" | ("-"))
 basic_number_2 ::= (([0-9] basic_number_2) | ([0-9]))
@@ -204,20 +207,26 @@ basic_number_5 ::= (([0-9] basic_number_5) | ([0-9]))
 basic_number_6 ::= ("" | ([eE] basic_number_4 basic_number_5))
 basic_array_1 ::= ("" | ([ \n\t]* "," [ \n\t]* basic_any basic_array_1))
 basic_object_1 ::= ("" | ([ \n\t]* "," [ \n\t]* basic_string [ \n\t]* ":" [ \n\t]* basic_any basic_object_1))
+xml_object_1 ::= ("" | ("<parameter=" xml_variable_name ">" [ \n\t]* xml_any [ \n\t]* "</parameter>" xml_object_1))
 root_prop_1_1 ::= ("" | ("-"))
 basic_number_7 ::= (("0") | ([1-9] [0-9]*))
-root_1 ::= ((root))
+root ::= ((root_0))
 """,
     )
 ]
 qwen_parameter_xml_instance_is_accepted = [
     ("<parameter=name>Bob</parameter><parameter=age>\t100\n</parameter>", True),
-    ("<parameter=name>Bob</parameter>\t\n<parameter=age>\t100\n</parameter>", True),
+    ("<parameter=name>Bob</parameter><parameter=age>\t100\n</parameter>", True),
     ("<parameter=name>Bob</parameter><parameter=age>100</parameter>", True),
-    ("\n\t<parameter=name>Bob</parameter><parameter=age>100</parameter>", True),
+    ("\n\t<parameter=name>Bob</parameter><parameter=age>100</parameter>", False),
     ('<parameter=name>"Bob&lt;"</parameter><parameter=age>100</parameter>', True),
-    ("<parameter=name><>Bob</parameter><parameter=age>100</parameter>", False),
-    ("<parameter=name>Bob</parameter><parameter=age>100</parameter>\t\t", False),
+    (
+        """<parameter=name><!DOCTYPE html>
+<html lang="en">
+  <body><h1>Hello</h1></body>
+</html></parameter><parameter=age>100</parameter>""",
+        True,
+    ),
 ]
 
 
@@ -230,6 +239,33 @@ def test_qwen_parameter_xml_format(
     check_stag_with_instance(stag_format, instance, is_accepted)
 
 
+# JSONSchemaFormat with style="qwen_xml" (same behavior as qwen_xml_parameter)
+json_schema_style_qwen_xml_stag_grammar = [
+    (
+        {
+            "type": "json_schema",
+            "json_schema": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+                "required": ["name", "age"],
+            },
+            "style": "qwen_xml",
+        },
+        qwen_parameter_xml_stag_grammar[0][1],  # same expected grammar as qwen_xml_parameter
+    )
+]
+
+
+@pytest.mark.parametrize("stag_format, expected_grammar", json_schema_style_qwen_xml_stag_grammar)
+@pytest.mark.parametrize("instance, is_accepted", qwen_parameter_xml_instance_is_accepted)
+def test_json_schema_style_qwen_xml_format(
+    stag_format: Dict[str, Any], expected_grammar: str, instance: str, is_accepted: bool
+):
+    """Test JSONSchemaFormat with style='qwen_xml' produces same grammar and acceptance."""
+    check_stag_with_grammar(stag_format, expected_grammar)
+    check_stag_with_instance(stag_format, instance, is_accepted)
+
+
 ebnf_grammar_stag_grammar = [
     (
         {
@@ -237,9 +273,9 @@ ebnf_grammar_stag_grammar = [
             "grammar": r"""root ::= "Hello!" number
             number ::= [0-9] | [0-9] number""",
         },
-        r"""root ::= (("Hello!" number))
+        r"""root_0 ::= (("Hello!" number))
 number ::= (([0-9]) | ([0-9] number))
-root_1 ::= ((root))
+root ::= ((root_0))
 """,
     )
 ]
@@ -264,9 +300,9 @@ def test_ebnf_grammar_format(
 regex_stag_grammar = [
     (
         {"type": "regex", "pattern": "Hello![0-9]+"},
-        r"""root ::= (("H" "e" "l" "l" "o" "!" root_1))
+        r"""root_0 ::= (("H" "e" "l" "l" "o" "!" root_1))
 root_1 ::= (([0-9] root_1) | ([0-9]))
-root_2 ::= ((root))
+root ::= ((root_0))
 """,
     )
 ]
@@ -310,7 +346,7 @@ basic_boolean ::= (("true") | ("false"))
 basic_null ::= (("null"))
 basic_array ::= (("[" [ \n\t]* basic_any basic_array_1 [ \n\t]* "]") | ("[" [ \n\t]* "]"))
 basic_object ::= (("{" [ \n\t]* basic_string [ \n\t]* ":" [ \n\t]* basic_any basic_object_1 [ \n\t]* "}") | ("{" [ \n\t]* "}"))
-root ::= ((basic_number))
+root_0 ::= ((basic_number))
 basic_integer_1 ::= ("" | ("-"))
 basic_number_1 ::= ("" | ("-"))
 basic_number_2 ::= (([0-9] basic_number_2) | ([0-9]))
@@ -324,8 +360,8 @@ basic_number_7 ::= (("0") | ([1-9] [0-9]*))
 root_1 ::= ("" | ([\-+*/]))
 root_2 ::= ((root_1_1))
 root_1_1 ::= ("" | ([simple]))
-sequence ::= ((const_string root root_1 root_2))
-root_3 ::= ((sequence))
+sequence ::= ((const_string root_0 root_1 root_2))
+root ::= ((sequence))
 """,
     )
 ]
@@ -375,7 +411,7 @@ basic_boolean ::= (("true") | ("false"))
 basic_null ::= (("null"))
 basic_array ::= (("[" [ \n\t]* basic_any basic_array_1 [ \n\t]* "]") | ("[" [ \n\t]* "]"))
 basic_object ::= (("{" [ \n\t]* basic_string [ \n\t]* ":" [ \n\t]* basic_any basic_object_1 [ \n\t]* "}") | ("{" [ \n\t]* "}"))
-root ::= ((basic_number))
+root_0 ::= ((basic_number))
 basic_integer_1 ::= ("" | ("-"))
 basic_number_1 ::= ("" | ("-"))
 basic_number_2 ::= (([0-9] basic_number_2) | ([0-9]))
@@ -386,8 +422,8 @@ basic_number_6 ::= ("" | ([eE] basic_number_4 basic_number_5))
 basic_array_1 ::= ("" | ([ \n\t]* "," [ \n\t]* basic_any basic_array_1))
 basic_object_1 ::= ("" | ([ \n\t]* "," [ \n\t]* basic_string [ \n\t]* ":" [ \n\t]* basic_any basic_object_1))
 basic_number_7 ::= (("0") | ([1-9] [0-9]*))
-or ::= ((const_string) | (root))
-root_1 ::= ((or))
+or ::= ((const_string) | (root_0))
+root ::= ((or))
 """,
     )
 ]
@@ -429,7 +465,7 @@ basic_boolean ::= (("true") | ("false"))
 basic_null ::= (("null"))
 basic_array ::= (("[" [ \n\t]* basic_any basic_array_1 [ \n\t]* "]") | ("[" [ \n\t]* "]"))
 basic_object ::= (("{" [ \n\t]* basic_string [ \n\t]* ":" [ \n\t]* basic_any basic_object_1 [ \n\t]* "}") | ("{" [ \n\t]* "}"))
-root ::= ((basic_number))
+root_0 ::= ((basic_number))
 basic_integer_1 ::= ("" | ("-"))
 basic_number_1 ::= ("" | ("-"))
 basic_number_2 ::= (([0-9] basic_number_2) | ([0-9]))
@@ -440,8 +476,8 @@ basic_number_6 ::= ("" | ([eE] basic_number_4 basic_number_5))
 basic_array_1 ::= ("" | ([ \n\t]* "," [ \n\t]* basic_any basic_array_1))
 basic_object_1 ::= ("" | ([ \n\t]* "," [ \n\t]* basic_string [ \n\t]* ":" [ \n\t]* basic_any basic_object_1))
 basic_number_7 ::= (("0") | ([1-9] [0-9]*))
-tag ::= (("BEG" root "END"))
-root_1 ::= ((tag))
+tag ::= (("BEG" root_0 "END"))
+root ::= ((tag))
 """,
     ),
     (
@@ -451,10 +487,10 @@ root_1 ::= ((tag))
             "content": {"type": "grammar", "grammar": "root ::= [+\\-]?[1-9][0-9]*"},
             "end": "END",
         },
-        r"""root ::= ((root_1 [1-9] [0-9]*))
+        r"""root_0 ::= ((root_1 [1-9] [0-9]*))
 root_1 ::= ("" | ([+\-]))
-tag ::= (("BEG" root "END"))
-root_2 ::= ((tag))
+tag ::= (("BEG" root_0 "END"))
+root ::= ((tag))
 """,
     ),
     (
@@ -464,10 +500,10 @@ root_2 ::= ((tag))
             "content": {"type": "regex", "pattern": "[+\\-]?[1-9][0-9]*"},
             "end": "END",
         },
-        r"""root ::= ((root_1 [1-9] [0-9]*))
+        r"""root_0 ::= ((root_1 [1-9] [0-9]*))
 root_1 ::= ("" | ([+\-]))
-tag ::= (("BEG" root "END"))
-root_2 ::= ((tag))
+tag ::= (("BEG" root_0 "END"))
+root ::= ((tag))
 """,
     ),
 ]
@@ -1721,6 +1757,10 @@ json_format_error_test_data = [
         '{"type": "structural_tag", "format": {"type": "tags_with_separator", "tags": [{"begin": "start", "content": {"type": "const_string", "value": "hello"}, "end": "end"}], "separator": "sep", "stop_after_first": "not_boolean"}}',
         "stop_after_first must be a boolean",
     ),
+    (
+        '{"type": "structural_tag", "format": {"type": "json_schema", "json_schema": {"type": "string"}, "style": "not_string"}}',
+        'style must be "json" or "qwen_xml"',
+    ),
 ]
 
 
@@ -1961,6 +2001,23 @@ basic_structural_tags_instance_is_accepted = [
     (xgr.structural_tag.JSONSchemaFormat(json_schema={"type": "string"}), '"abc"', True),
     (xgr.structural_tag.JSONSchemaFormat(json_schema={"type": "integer"}), "123", True),
     (xgr.structural_tag.JSONSchemaFormat(json_schema={"type": "integer"}), "abc", False),
+    # JSONSchemaFormat with style="qwen_xml"
+    (
+        xgr.structural_tag.JSONSchemaFormat(
+            json_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+            style="qwen_xml",
+        ),
+        "<parameter=name>value</parameter>",
+        True,
+    ),
+    (
+        xgr.structural_tag.JSONSchemaFormat(
+            json_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+            style="qwen_xml",
+        ),
+        "<parameter=name>value</param>",
+        False,
+    ),
     # AnyTextFormat
     (xgr.structural_tag.AnyTextFormat(), "", True),
     (xgr.structural_tag.AnyTextFormat(), "any text here", True),
@@ -2541,6 +2598,121 @@ def test_structural_tag_fingerprint_changes_on_field_diff():
 
     # Different values produce distinct rules.
     assert "const_string_1 ::=" in grammar_str
+
+test_strings_is_accepted_single_excludes = [
+    ("XYZ", True),
+    ("Hello World", True),
+    ("ABC", False),
+    ("123ABC456", False),
+    ("A quick brown fox", True),
+    ("", True),
+]
+
+
+@pytest.mark.parametrize("instance, is_accepted", test_strings_is_accepted_single_excludes)
+def test_excluded_strings_in_single_any_text(instance: str, is_accepted: bool):
+
+    format = {"type": "any_text", "excludes": ["ABC"]}
+
+    expected_grammar = r"""any_text ::= TagDispatch(
+  stop_eos=true,
+  stop_str=(),
+  loop_after_dispatch=false,
+  excludes=("ABC")
+)
+root ::= ((any_text))
+"""
+
+    check_stag_with_grammar(format, expected_grammar)
+    check_stag_with_instance(format, instance, is_accepted)
+
+
+test_strings_is_accepted_excluded_any_text_within_sequence = [
+    ("HelloABC", True),
+    ("WorldABC", True),
+    ("NoExclusionHere", False),
+    ("JustSomeText", False),
+    ("ABC", True),
+    ("SomeTextBeforeABC", True),
+]
+
+
+@pytest.mark.parametrize(
+    "instance, is_accepted", test_strings_is_accepted_excluded_any_text_within_sequence
+)
+def test_excluded_any_text_within_sequence(instance: str, is_accepted: bool):
+
+    format = {
+        "type": "sequence",
+        "elements": [
+            {"type": "any_text", "excludes": ["ABC"]},
+            {"type": "const_string", "value": "ABC"},
+        ],
+    }
+
+    expected_grammar = r"""any_text ::= TagDispatch(
+  stop_eos=true,
+  stop_str=(),
+  loop_after_dispatch=false,
+  excludes=("ABC")
+)
+const_string ::= (("ABC"))
+sequence ::= ((any_text const_string))
+root ::= ((sequence))
+"""
+
+    check_stag_with_grammar(format, expected_grammar)
+    check_stag_with_instance(format, instance, is_accepted)
+
+
+test_strings_is_accepted_excluded_triggered_tags_without_end = [
+    ("1ABC", False),
+    ("11ABC", True),
+    ("1HelloWorld", False),
+    ("1ABC123", False),
+    ("2ABC", True),
+]
+
+
+@pytest.mark.parametrize(
+    "instance, is_accepted", test_strings_is_accepted_excluded_triggered_tags_without_end
+)
+def test_excludes_triggered_tags_without_end(instance: str, is_accepted: bool):
+
+    stag = {
+        "type": "sequence",
+        "elements": [
+            {
+                "type": "triggered_tags",
+                "triggers": ["1"],
+                "tags": [{"begin": "1", "content": {"type": "any_text"}, "end": ["1"]}],
+                "excludes": ["ABC"],
+            },
+            {"type": "const_string", "value": "ABC"},
+        ],
+    }
+
+    expected_grammar = r"""any_text ::= TagDispatch(
+  stop_eos=false,
+  stop_str=("1"),
+  loop_after_dispatch=false,
+  excludes=()
+)
+triggered_tags_group ::= (("" any_text))
+triggered_tags ::= TagDispatch(
+  ("1", triggered_tags_group),
+  stop_eos=true,
+  stop_str=(),
+  loop_after_dispatch=true,
+  excludes=("ABC")
+)
+const_string ::= (("ABC"))
+sequence ::= ((triggered_tags const_string))
+root ::= ((sequence))
+"""
+
+    check_stag_with_grammar(stag, expected_grammar)
+    check_stag_with_instance(stag, instance, is_accepted)
 
 
 if __name__ == "__main__":

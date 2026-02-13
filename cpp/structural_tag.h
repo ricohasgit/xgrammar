@@ -11,7 +11,6 @@
 #include <xgrammar/grammar.h>
 
 #include <memory>
-#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -26,7 +25,6 @@ namespace xgrammar {
 
 struct ConstStringFormat;
 struct JSONSchemaFormat;
-struct QwenXmlParameterFormat;
 struct AnyTextFormat;
 struct GrammarFormat;
 struct RegexFormat;
@@ -39,7 +37,6 @@ struct TagsWithSeparatorFormat;
 using Format = std::variant<
     ConstStringFormat,
     JSONSchemaFormat,
-    QwenXmlParameterFormat,
     AnyTextFormat,
     GrammarFormat,
     RegexFormat,
@@ -60,13 +57,9 @@ struct ConstStringFormat {
 struct JSONSchemaFormat {
   static constexpr const char* type = "json_schema";
   std::string json_schema;
-  JSONSchemaFormat(std::string json_schema) : json_schema(std::move(json_schema)) {}
-};
-
-struct QwenXmlParameterFormat {
-  static constexpr const char* type = "qwen_xml";
-  std::string xml_schema;
-  QwenXmlParameterFormat(std::string xml_schema) : xml_schema(std::move(xml_schema)) {}
+  std::string style = "json";  // "json" or "qwen_xml"
+  JSONSchemaFormat(std::string json_schema, std::string style = "json")
+      : json_schema(std::move(json_schema)), style(std::move(style)) {}
 };
 
 struct GrammarFormat {
@@ -85,8 +78,8 @@ struct RegexFormat {
 
 struct AnyTextFormat {
   static constexpr const char* type = "any_text";
-  std::vector<std::string> excluded_strs;
-  AnyTextFormat(std::vector<std::string> excluded_strs) : excluded_strs(excluded_strs) {}
+  std::vector<std::string> excludes;
+  AnyTextFormat(std::vector<std::string> excluded_strs) : excludes(std::move(excluded_strs)) {}
 
  private:
   // Detected in StructuralTagAnalyzer - supports multiple end strings
@@ -151,7 +144,7 @@ struct TriggeredTagsFormat {
   )
       : triggers(std::move(triggers)),
         tags(std::move(tags)),
-        excludes(excludes),
+        excludes(std::move(excludes)),
         at_least_one(at_least_one),
         stop_after_first(stop_after_first) {}
 

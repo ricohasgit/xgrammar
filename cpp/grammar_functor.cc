@@ -10,14 +10,19 @@
 #include <bitset>
 #include <cstdint>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <queue>
 #include <set>
 #include <stack>
+#include <tuple>
 #include <vector>
 
+#include "compiled_grammar_impl.h"
 #include "fsm_builder.h"
 #include "grammar_builder.h"
 #include "grammar_impl.h"
+#include "support/container.h"
 #include "support/encoding.h"
 #include "support/logging.h"
 #include "xgrammar/grammar.h"
@@ -482,7 +487,10 @@ class GrammarNormalizerImpl {
  public:
   GrammarNormalizerImpl() = default;
 
-  Grammar Apply(const Grammar& grammar) { return StructureNormalizerImpl().Apply(grammar); }
+  Grammar Apply(const Grammar& grammar) {
+    auto renamed_grammar = RootRuleRenamer::Apply(grammar);
+    return StructureNormalizerImpl().Apply(renamed_grammar);
+  }
 };
 
 /*************************** Impl of grammar optimizers ***************************/
@@ -955,6 +963,35 @@ class AllowEmptyRuleAnalyzerImpl : public GrammarVisitor<std::vector<int32_t>> {
   }
 };
 
+// Convert a Unicode codepoint to the packed UTF-8 format used by AddCharacterRange.
+// The packed format stores UTF-8 bytes as: (byte0 << 24) | (byte1 << 16) | (byte2 << 8) | byte3
+// where byte0 is the first UTF-8 byte (leading byte) and subsequent bytes are continuation bytes.
+inline uint32_t CodepointToPackedUTF8(uint32_t codepoint) {
+  if (codepoint <= 0x7F) {
+    // 1-byte sequence (ASCII)
+    return codepoint;
+  } else if (codepoint <= 0x7FF) {
+    // 2-byte sequence: byte0 = 110xxxxx, byte1 = 10xxxxxx
+    uint8_t byte0 = 0xC0 | ((codepoint >> 6) & 0x1F);
+    uint8_t byte1 = 0x80 | (codepoint & 0x3F);
+    return (static_cast<uint32_t>(byte0) << 8) | byte1;
+  } else if (codepoint <= 0xFFFF) {
+    // 3-byte sequence: byte0 = 1110xxxx, byte1 = 10xxxxxx, byte2 = 10xxxxxx
+    uint8_t byte0 = 0xE0 | ((codepoint >> 12) & 0x0F);
+    uint8_t byte1 = 0x80 | ((codepoint >> 6) & 0x3F);
+    uint8_t byte2 = 0x80 | (codepoint & 0x3F);
+    return (static_cast<uint32_t>(byte0) << 16) | (static_cast<uint32_t>(byte1) << 8) | byte2;
+  } else {
+    // 4-byte sequence: byte0 = 11110xxx, byte1-3 = 10xxxxxx
+    uint8_t byte0 = 0xF0 | ((codepoint >> 18) & 0x07);
+    uint8_t byte1 = 0x80 | ((codepoint >> 12) & 0x3F);
+    uint8_t byte2 = 0x80 | ((codepoint >> 6) & 0x3F);
+    uint8_t byte3 = 0x80 | (codepoint & 0x3F);
+    return (static_cast<uint32_t>(byte0) << 24) | (static_cast<uint32_t>(byte1) << 16) |
+           (static_cast<uint32_t>(byte2) << 8) | byte3;
+  }
+}
+
 class GrammarFSMBuilderImpl {
  public:
   const static uint32_t kMax1ByteUnicode = 0x7F;
@@ -1308,9 +1345,12 @@ FSMWithStartEnd GrammarFSMBuilderImpl::CharacterClass(const GrammarExpr& expr) {
   }
   result_fsm.AddEndState(end_state);
   for (int i = 1; i < static_cast<int>(expr.size()); i += 2) {
-    uint8_t byte_min = static_cast<uint8_t>(expr[i]);
-    uint8_t byte_max = static_cast<uint8_t>(expr[i + 1]);
-    result_fsm.GetFsm().AddEdge(start_state, end_state, byte_min, byte_max);
+    uint32_t codepoint_min = static_cast<uint32_t>(expr[i]);
+    uint32_t codepoint_max = static_cast<uint32_t>(expr[i + 1]);
+    // Convert Unicode codepoints to packed UTF-8 format for AddCharacterRange
+    uint32_t packed_min = CodepointToPackedUTF8(codepoint_min);
+    uint32_t packed_max = CodepointToPackedUTF8(codepoint_max);
+    AddCharacterRange(result_fsm, start_state, end_state, packed_min, packed_max);
   }
   return result_fsm;
 }
@@ -1640,9 +1680,48 @@ class ByteStringFuserImpl : public GrammarMutator {
   }
 };
 
+class RootRuleRenamerImpl {
+ public:
+  static Grammar Apply(const Grammar& grammar) {
+    // If the root name is "root", return directly.
+    if (grammar->GetRootRule().name == "root") {
+      return grammar;
+    }
+
+    // Collect all the rule names.
+    std::unordered_set<std::string> rule_names;
+    int root_name_rule_id = -1;
+    for (int i = 0; i < grammar->NumRules(); i++) {
+      const auto& rule_name = grammar->GetRule(i).name;
+      if (rule_name == "root") {
+        root_name_rule_id = i;
+      }
+      rule_names.insert(rule_name);
+    }
+
+    // Rename the rules.
+    Grammar grammar_copy = grammar;
+    grammar_copy->GetRule(grammar_copy->GetRootRuleId()).name = "root";
+    if (root_name_rule_id != -1) {
+      std::string rule_prefix = "root_";
+      for (int i = 0; i <= grammar_copy->NumRules(); i++) {
+        std::string new_rule_name = rule_prefix + std::to_string(i);
+        if (rule_names.find(new_rule_name) == rule_names.end()) {
+          grammar_copy->GetRule(root_name_rule_id).name = new_rule_name;
+          break;
+        }
+        XGRAMMAR_DCHECK(false
+        ) << "The rule must be renamed successfully after (n + 1) times of iterations.";
+      }
+    }
+    return grammar_copy;
+  }
+};
+
 class GrammarFSMHasherImpl {
  public:
   void Apply(Grammar* grammar);
+  static std::optional<uint64_t> HashSequence(const Grammar& grammar, int32_t sequence_id);
 
   static const int16_t kNotEndStateFlag = -0x100;
   static const int16_t kEndStateFlag = -0x200;
@@ -1742,7 +1821,7 @@ void GrammarFSMHasherImpl::HashSimpleCycle(const std::vector<int32_t>& simple_cy
     uint64_t current_hash = 0;
     for (int j = 0; j < static_cast<int>(local_cycle_hash.size()); j++) {
       current_hash =
-          HashCombine64Bits(current_hash, local_cycle_hash_copy[(i + j) % local_cycle_hash.size()]);
+          HashCombine(current_hash, local_cycle_hash_copy[(i + j) % local_cycle_hash.size()]);
     }
     local_cycle_hash[i] = current_hash;
   }
@@ -1786,8 +1865,7 @@ void GrammarFSMHasherImpl::Apply(Grammar* grammar) {
   grammar_ = grammar;
   grammar->ImplPtr()->per_rule_fsm_hashes =
       std::vector<std::optional<uint64_t>>((*grammar)->NumRules());
-  grammar->ImplPtr()->per_rule_fsm_new_state_ids =
-      std::vector<std::optional<std::vector<std::pair<int32_t, int32_t>>>>((*grammar)->NumRules());
+  grammar->ImplPtr()->per_rule_fsm_new_state_ids.resize((*grammar)->NumRules());
   ref_graph_from_referee_to_referrer_.clear();
   ref_graph_from_referrer_to_referee_.clear();
   sorted_edges_.clear();
@@ -1886,18 +1964,18 @@ std::pair<bool, uint64_t> GrammarFSMHasherImpl::IsPartialHashable(int fsm_index)
   bfs_queue.push(fsm->GetStart());
   // Perform a bfs to hash all the edges.
   while (!bfs_queue.empty()) {
-    const int& current_old_state_id = std::move(bfs_queue.front());
+    int current_old_state_id = bfs_queue.front();
     bool is_start = current_old_state_id == fsm->GetStart();
-    const int& current_new_state_id = original_state_id_to_new_id[current_old_state_id];
+    int current_new_state_id = original_state_id_to_new_id[current_old_state_id];
     bfs_queue.pop();
 
     // Check if the current state is an end state.
     if (fsm->IsEndState(current_old_state_id)) {
-      hash_result = HashCombine64Bits(
+      hash_result = HashCombine(
           hash_result, current_new_state_id, kEndStateFlag, kEndStateFlag, current_new_state_id
       );
     } else {
-      hash_result = HashCombine64Bits(
+      hash_result = HashCombine(
           hash_result,
           current_new_state_id,
           kNotEndStateFlag,
@@ -1945,7 +2023,7 @@ std::pair<bool, uint64_t> GrammarFSMHasherImpl::IsPartialHashable(int fsm_index)
         bfs_queue.push(target);
       }
       int32_t target_new_id = original_state_id_to_new_id[target];
-      hash_result = HashCombine64Bits(hash_result, current_new_state_id, hash, target_new_id);
+      hash_result = HashCombine(hash_result, current_new_state_id, hash, target_new_id);
     }
 
     // Then, check the edges which are not rule references.
@@ -1960,7 +2038,7 @@ std::pair<bool, uint64_t> GrammarFSMHasherImpl::IsPartialHashable(int fsm_index)
       if (edge.IsRuleRef()) {
         continue;
       }
-      hash_result = HashCombine64Bits(
+      hash_result = HashCombine(
           hash_result,
           current_new_state_id,
           static_cast<int32_t>(edge.min),
@@ -1969,10 +2047,12 @@ std::pair<bool, uint64_t> GrammarFSMHasherImpl::IsPartialHashable(int fsm_index)
       );
     }
   }
-  auto& id_mapping = grammar_->ImplPtr()->per_rule_fsm_new_state_ids[fsm_index];
-  id_mapping = std::vector<std::pair<int32_t, int32_t>>(
-      original_state_id_to_new_id.begin(), original_state_id_to_new_id.end()
-  );
+  std::vector<std::pair<int32_t, int32_t>> new_id_mapping;
+  new_id_mapping.reserve(original_state_id_to_new_id.size());
+  for (const auto& [original_state_id, new_state_id] : original_state_id_to_new_id) {
+    new_id_mapping.emplace_back(original_state_id, new_state_id);
+  }
+  grammar_->ImplPtr()->per_rule_fsm_new_state_ids[fsm_index] = new_id_mapping;
   return {true, hash_result};
 }
 
@@ -1990,17 +2070,17 @@ uint64_t GrammarFSMHasherImpl::HashFsm(int fsm_index) {
 
   // Perform a bfs to hash all the edges.
   while (!bfs_queue.empty()) {
-    const int& current_old_state_id = std::move(bfs_queue.front());
-    const int& current_new_state_id = original_state_id_to_new_id[current_old_state_id];
+    int current_old_state_id = bfs_queue.front();
+    int current_new_state_id = original_state_id_to_new_id[current_old_state_id];
     bfs_queue.pop();
 
     // Check if the current state is an end state.
     if (fsm->IsEndState(current_old_state_id)) {
-      hash_result = HashCombine64Bits(
+      hash_result = HashCombine(
           hash_result, current_new_state_id, kEndStateFlag, kEndStateFlag, current_new_state_id
       );
     } else {
-      hash_result = HashCombine64Bits(
+      hash_result = HashCombine(
           hash_result,
           current_new_state_id,
           kNotEndStateFlag,
@@ -2035,7 +2115,7 @@ uint64_t GrammarFSMHasherImpl::HashFsm(int fsm_index) {
         bfs_queue.push(target);
       }
       int32_t target_new_id = original_state_id_to_new_id[target];
-      hash_result = HashCombine64Bits(hash_result, current_new_state_id, hash, target_new_id);
+      hash_result = HashCombine(hash_result, current_new_state_id, hash, target_new_id);
     }
 
     // Then, check the edges which are not rule references.
@@ -2050,7 +2130,7 @@ uint64_t GrammarFSMHasherImpl::HashFsm(int fsm_index) {
       if (edge.IsRuleRef()) {
         continue;
       }
-      hash_result = HashCombine64Bits(
+      hash_result = HashCombine(
           hash_result,
           current_new_state_id,
           static_cast<int32_t>(edge.min),
@@ -2059,157 +2139,234 @@ uint64_t GrammarFSMHasherImpl::HashFsm(int fsm_index) {
       );
     }
   }
-  auto& id_mapping = grammar_->ImplPtr()->per_rule_fsm_new_state_ids[fsm_index];
-  id_mapping = std::vector<std::pair<int32_t, int32_t>>(
-      original_state_id_to_new_id.begin(), original_state_id_to_new_id.end()
-  );
+  std::vector<std::pair<int32_t, int32_t>> new_id_mapping;
+  new_id_mapping.reserve(original_state_id_to_new_id.size());
+  for (const auto& [original_state_id, new_state_id] : original_state_id_to_new_id) {
+    new_id_mapping.emplace_back(original_state_id, new_state_id);
+  }
+  grammar_->ImplPtr()->per_rule_fsm_new_state_ids[fsm_index] = new_id_mapping;
   return hash_result;
 }
 
-class CrossingCacheManagerImpl {
+std::optional<uint64_t> GrammarFSMHasherImpl::HashSequence(
+    const Grammar& grammar, int32_t sequence_id
+) {
+  using GrammarExprType = Grammar::Impl::GrammarExprType;
+  if (sequence_id == -1) {
+    return std::nullopt;
+  }
+  uint64_t hash_result = 0;
+  const auto& sequence_expr = grammar->GetGrammarExpr(sequence_id);
+  XGRAMMAR_DCHECK(sequence_expr.type == GrammarExprType::kSequence)
+      << "GrammarExpr is not a sequence";
+  for (const auto& expr_id : sequence_expr) {
+    const auto& expr = grammar->GetGrammarExpr(expr_id);
+    hash_result = HashCombine(hash_result, static_cast<int32_t>(expr.type));
+    switch (expr.type) {
+      case (GrammarExprType::kByteString):
+      case (GrammarExprType::kCharacterClass):
+      case (GrammarExprType::kCharacterClassStar):
+      case (GrammarExprType::kEmptyStr): {
+        for (const auto& element : expr) {
+          hash_result = HashCombine(hash_result, element);
+        }
+        break;
+      }
+      case (GrammarExprType::kRuleRef): {
+        if (grammar->per_rule_fsm_hashes[expr[0]].has_value()) {
+          hash_result = HashCombine(hash_result, grammar->per_rule_fsm_hashes[expr[0]].value());
+        } else {
+          return std::nullopt;
+        }
+        break;
+      }
+      case (GrammarExprType::kRepeat): {
+        if (grammar->per_rule_fsm_hashes[expr[0]].has_value()) {
+          hash_result = HashCombine(hash_result, grammar->per_rule_fsm_hashes[expr[0]].value());
+        } else {
+          return std::nullopt;
+        }
+        hash_result = HashCombine(hash_result, expr[1]);
+        hash_result = HashCombine(hash_result, expr[2]);
+        break;
+      }
+      case (GrammarExprType::kSequence):
+      case (GrammarExprType::kChoices): {
+        return std::nullopt;
+      }
+      case (GrammarExprType::kTagDispatch): {
+        return std::nullopt;
+      }
+    }
+  }
+  return hash_result;
+}
+
+class RuleLevelCache::Impl {
  public:
+  using NodeKey = std::tuple<
+      uint64_t /*The hash value of the FSM*/,
+      int32_t /* The normalized node id*/,
+      int32_t /*The number of states*/,
+      int32_t /* The number of edges*/>;
+  using NodeType = std::pair<NodeKey, AdaptiveTokenMask>;
+
+  explicit Impl(size_t max_cache_memory_size) : max_cache_memory_size_(max_cache_memory_size) {}
+
   std::optional<AdaptiveTokenMask> GetCache(
-      const uint64_t& fsm_hash, int32_t fsm_new_node_id, const uint64_t& tokenizer_hash
+      const uint64_t& fsm_hash,
+      int32_t fsm_new_node_id,
+      const int32_t& state_cnt,
+      const int32_t edge_cnt
   );
+
   bool AddCache(
       const uint64_t& fsm_hash,
       int32_t fsm_new_node_id,
-      const uint64_t& tokenizer_hash,
+      const int32_t& state_cnt,
+      const int32_t edge_cnt,
       const AdaptiveTokenMask& token_mask
   );
+
   bool AddCache(
       const uint64_t& fsm_hash,
       int32_t fsm_new_node_id,
-      const uint64_t& tokenizer_hash,
+      const int32_t& state_cnt,
+      const int32_t edge_cnt,
       AdaptiveTokenMask&& token_mask
   );
-  CrossingCacheManagerImpl(size_t max_cache_size = CrossingCacheManager::kUnlimitedSize)
-      : max_cache_size_(max_cache_size) {}
 
   void ClearCache();
 
+  friend size_t MemorySize(const Impl* impl) { return impl->current_cache_memory_size_; }
+
+  size_t GetMaxSize() const { return max_cache_memory_size_; }
+
  private:
+  // The cache map: fsm_hash -> fsm_new_node_id -> AdaptiveTokenMask
   std::mutex mutex_;
-  const size_t max_cache_size_;
-  std::list<std::pair<std::tuple<uint64_t, int32_t, uint64_t>, AdaptiveTokenMask>> cache_list_;
-  std::unordered_map<std::tuple<uint64_t, int32_t, uint64_t>, decltype(cache_list_.begin())> cache_;
+  const size_t max_cache_memory_size_;
+  int64_t current_cache_memory_size_ = 0;
+  List<NodeType> cache_list_;
+  std::unordered_map<NodeKey, int> cache_;
 };
 
-std::optional<AdaptiveTokenMask> CrossingCacheManager::CrossingCacheManagerImpl::GetCache(
-    const uint64_t& fsm_hash, int32_t fsm_new_node_id, const uint64_t& tokenizer_hash
-) {
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  if (cache_.find(std::make_tuple(fsm_hash, fsm_new_node_id, tokenizer_hash)) == cache_.end()) {
-    // The cache is not hit.
-    return std::nullopt;
-  }
-  // Perform LRU.
-  auto list_iterator = cache_[std::make_tuple(fsm_hash, fsm_new_node_id, tokenizer_hash)];
-  cache_list_.splice(cache_list_.begin(), cache_list_, list_iterator);
-
-  // Return the cached token mask.
-  return cache_list_.front().second;
-}
-
-bool CrossingCacheManager::CrossingCacheManagerImpl::AddCache(
+std::optional<AdaptiveTokenMask> RuleLevelCache::GetCache(
     const uint64_t& fsm_hash,
     int32_t fsm_new_node_id,
-    const uint64_t& tokenizer_hash,
+    const int32_t& state_cnt,
+    const int32_t edge_cnt
+) {
+  return pimpl_->GetCache(fsm_hash, fsm_new_node_id, state_cnt, edge_cnt);
+}
+
+bool RuleLevelCache::AddCache(
+    const uint64_t& fsm_hash,
+    int32_t fsm_new_node_id,
+    const int32_t& state_cnt,
+    const int32_t edge_cnt,
     const AdaptiveTokenMask& token_mask
 ) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (cache_.find(std::make_tuple(fsm_hash, fsm_new_node_id, tokenizer_hash)) != cache_.end() ||
-      MemorySize(token_mask) > max_cache_memory_size_) {
-    // The cache already exists or the token mask is too large.
-    return false;
-  }
-  // Add the new cache.
-  cache_list_.emplace_front(
-      std::make_pair(std::make_tuple(fsm_hash, fsm_new_node_id, tokenizer_hash), token_mask)
-  );
-  cache_[std::make_tuple(fsm_hash, fsm_new_node_id, tokenizer_hash)] = cache_list_.begin();
-  current_cache_memory_size_ += MemorySize(token_mask);
-
-  // If the cache exceeds the maximum size, evict the least recently used item.
-  while ((!(max_cache_memory_size_ == kUnlimitedSize)) &&
-         current_cache_memory_size_ > static_cast<int64_t>(max_cache_memory_size_)) {
-    auto last_cache_list_iterator = cache_list_.end();
-    last_cache_list_iterator--;
-    current_cache_memory_size_ -= MemorySize(last_cache_list_iterator->second);
-    cache_.erase(last_cache_list_iterator->first);
-    cache_list_.pop_back();
-  }
-  return true;
+  return pimpl_->AddCache(fsm_hash, fsm_new_node_id, state_cnt, edge_cnt, token_mask);
 }
 
-bool CrossingCacheManager::CrossingCacheManagerImpl::AddCache(
+bool RuleLevelCache::AddCache(
     const uint64_t& fsm_hash,
     int32_t fsm_new_node_id,
-    const uint64_t& tokenizer_hash,
+    const int32_t& state_cnt,
+    const int32_t edge_cnt,
     AdaptiveTokenMask&& token_mask
 ) {
+  return pimpl_->AddCache(fsm_hash, fsm_new_node_id, state_cnt, edge_cnt, std::move(token_mask));
+}
+
+void RuleLevelCache::ClearCache() { pimpl_->ClearCache(); }
+
+size_t RuleLevelCache::GetMaxSize() const { return pimpl_->GetMaxSize(); }
+
+std::optional<AdaptiveTokenMask> RuleLevelCache::Impl::GetCache(
+    const uint64_t& fsm_hash,
+    int32_t fsm_new_node_id,
+    const int32_t& state_cnt,
+    const int32_t edge_cnt
+) {
+  // Find in the cache.
   std::lock_guard<std::mutex> lock(mutex_);
-  if (cache_.find(std::make_tuple(fsm_hash, fsm_new_node_id, tokenizer_hash)) != cache_.end() ||
-      MemorySize(token_mask) > max_cache_memory_size_) {
-    // The cache already exists or the token mask is too large.
+  NodeKey key = std::make_tuple(fsm_hash, fsm_new_node_id, state_cnt, edge_cnt);
+  auto it = cache_.find(key);
+  if (it == cache_.end()) {
+    return std::nullopt;
+  }
+
+  // Move the node to the back of the list.
+  cache_list_.MoveBack(it->second);
+  return List<NodeType>::iterator(it->second, cache_list_)->second;
+}
+
+bool RuleLevelCache::Impl::AddCache(
+    const uint64_t& fsm_hash,
+    int32_t fsm_new_node_id,
+    const int32_t& state_cnt,
+    const int32_t edge_cnt,
+    const AdaptiveTokenMask& token_mask
+) {
+  return AddCache(fsm_hash, fsm_new_node_id, state_cnt, edge_cnt, AdaptiveTokenMask(token_mask));
+}
+
+bool RuleLevelCache::Impl::AddCache(
+    const uint64_t& fsm_hash,
+    int32_t fsm_new_node_id,
+    const int32_t& state_cnt,
+    const int32_t edge_cnt,
+    AdaptiveTokenMask&& token_mask
+) {
+  // Check if we can add to the cache.
+  std::lock_guard<std::mutex> lock(mutex_);
+  NodeKey key = std::make_tuple(fsm_hash, fsm_new_node_id, state_cnt, edge_cnt);
+  if (max_cache_memory_size_ != kUnlimitedSize && MemorySize(token_mask) > max_cache_memory_size_) {
+    // The token mask is too large to be cached.
     return false;
   }
-  // Add the new cache.
-  cache_list_.emplace_front(std::make_pair(
-      std::make_tuple(fsm_hash, fsm_new_node_id, tokenizer_hash), std::move(token_mask)
-  ));
-  cache_[std::make_tuple(fsm_hash, fsm_new_node_id, tokenizer_hash)] = cache_list_.begin();
-  current_cache_memory_size_ += MemorySize(cache_list_.front().second);
-
-  // If the cache exceeds the maximum size, evict the least recently used item.
-  while ((!(max_cache_memory_size_ == kUnlimitedSize)) &&
-         current_cache_memory_size_ > static_cast<int64_t>(max_cache_memory_size_)) {
-    auto last_cache_list_iterator = cache_list_.end();
-    last_cache_list_iterator--;
-    current_cache_memory_size_ -= MemorySize(last_cache_list_iterator->second);
-    cache_.erase(last_cache_list_iterator->first);
-    cache_list_.pop_back();
+  if (cache_.find(key) != cache_.end()) {
+    // Already exists.
+    return false;
   }
+
+  // Evict old entries if needed.
+  if (max_cache_memory_size_ != kUnlimitedSize) {
+    size_t new_item_size = MemorySize(token_mask);
+    while ((current_cache_memory_size_) >
+           static_cast<int64_t>(max_cache_memory_size_ - new_item_size)) {
+      auto oldest_it = cache_list_.begin();
+      if (oldest_it == cache_list_.end()) {
+        // This should not happen if the size of the new item is smaller than
+        // max_cache_memory_size_, but this is a safeguard.
+        break;
+      }
+      current_cache_memory_size_ -= MemorySize(oldest_it->second);
+      cache_.erase(oldest_it->first);
+      cache_list_.Erase(oldest_it);
+    }
+  }
+
+  // Add to the cache.
+  auto new_it = cache_list_.PushBack(NodeType(key, std::move(token_mask)));
+  current_cache_memory_size_ += MemorySize(new_it->second);
+  cache_[key] = new_it.Index();
   return true;
 }
 
-void CrossingCacheManager::CrossingCacheManagerImpl::ClearCache() {
+RuleLevelCache::RuleLevelCache(size_t max_cache_memory_size)
+    : pimpl_(std::make_shared<Impl>(max_cache_memory_size)) {}
+
+void RuleLevelCache::Impl::ClearCache() {
   std::lock_guard<std::mutex> lock(mutex_);
+  cache_list_.Clear();
   cache_.clear();
-  cache_list_.clear();
   current_cache_memory_size_ = 0;
 }
 
-std::optional<AdaptiveTokenMask> CrossingCacheManager::GetCache(
-    const uint64_t& fsm_hash, int32_t fsm_new_node_id, const uint64_t& tokenizer_hash
-) {
-  return crossing_cache_manager_impl_.GetCache(fsm_hash, fsm_new_node_id, tokenizer_hash);
-}
-
-bool CrossingCacheManager::AddCache(
-    const uint64_t& fsm_hash,
-    int32_t fsm_new_node_id,
-    const uint64_t& tokenizer_hash,
-    const AdaptiveTokenMask& token_mask
-) {
-  return crossing_cache_manager_impl_.AddCache(
-      fsm_hash, fsm_new_node_id, tokenizer_hash, token_mask
-  );
-}
-
-bool CrossingCacheManager::AddCache(
-    const uint64_t& fsm_hash,
-    int32_t fsm_new_node_id,
-    const uint64_t& tokenizer_hash,
-    AdaptiveTokenMask&& token_mask
-) {
-  return crossing_cache_manager_impl_.AddCache(
-      fsm_hash, fsm_new_node_id, tokenizer_hash, std::move(token_mask)
-  );
-}
-
-void CrossingCacheManager::ClearCache() { crossing_cache_manager_impl_.ClearCache(); }
+size_t MemorySize(const RuleLevelCache& manager) { return MemorySize(manager.ImplPtr()); }
 
 /*************************** Forward grammar constructors to their impl ***************************/
 
@@ -2242,6 +2399,12 @@ void GrammarFSMBuilder::Apply(Grammar* grammar) { GrammarFSMBuilderImpl().Apply(
 void RepetitionNormalizer::Apply(Grammar* grammar) { RepetitionNormalizerImpl().Apply(grammar); }
 
 void GrammarFSMHasher::Apply(Grammar* grammar) { GrammarFSMHasherImpl().Apply(grammar); }
+
+std::optional<uint64_t> GrammarFSMHasher::HashSequence(
+    const Grammar& grammar, int32_t sequence_id
+) {
+  return GrammarFSMHasherImpl().HashSequence(grammar, sequence_id);
+}
 
 FSMWithStartEnd GrammarFSMBuilder::RuleRef(const GrammarExpr& expr) {
   return GrammarFSMBuilderImpl::RuleRef(expr);
@@ -2293,6 +2456,10 @@ Grammar GrammarOptimizer::Apply(const Grammar& grammar) {
 
 Grammar ByteStringFuser::Apply(const Grammar& grammar) {
   return ByteStringFuserImpl().Apply(grammar);
+}
+
+Grammar RootRuleRenamer::Apply(const Grammar& grammar) {
+  return RootRuleRenamerImpl().Apply(grammar);
 }
 
 }  // namespace xgrammar

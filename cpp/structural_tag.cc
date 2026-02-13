@@ -8,6 +8,7 @@
 #include <xgrammar/exception.h>
 
 #include <algorithm>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -49,8 +50,8 @@ class StructuralTagParser {
    */
   Result<Format, ISTError> ParseFormat(const picojson::value& value);
   Result<ConstStringFormat, ISTError> ParseConstStringFormat(const picojson::object& value);
-  Result<JSONSchemaFormat, ISTError> ParseJSONSchemaFormat(const picojson::object& value);
-  Result<QwenXmlParameterFormat, ISTError> ParseQwenXmlParameterFormat(const picojson::object& value
+  Result<JSONSchemaFormat, ISTError> ParseJSONSchemaFormat(
+      const picojson::object& value, std::optional<std::string> style_override = std::nullopt
   );
   Result<AnyTextFormat, ISTError> ParseAnyTextFormat(const picojson::object& value);
   Result<GrammarFormat, ISTError> ParseGrammarFormat(const picojson::object& value);
@@ -131,7 +132,7 @@ Result<Format, ISTError> StructuralTagParser::ParseFormat(const picojson::value&
     } else if (type == "tags_with_separator") {
       return Result<Format, ISTError>::Convert(ParseTagsWithSeparatorFormat(obj));
     } else if (type == "qwen_xml_parameter") {
-      return Result<Format, ISTError>::Convert(ParseQwenXmlParameterFormat(obj));
+      return Result<Format, ISTError>::Convert(ParseJSONSchemaFormat(obj, "qwen_xml"));
     } else if (type == "grammar") {
       return Result<Format, ISTError>::Convert(ParseGrammarFormat(obj));
     } else if (type == "regex") {
@@ -191,7 +192,7 @@ Result<ConstStringFormat, ISTError> StructuralTagParser::ParseConstStringFormat(
 }
 
 Result<JSONSchemaFormat, ISTError> StructuralTagParser::ParseJSONSchemaFormat(
-    const picojson::object& obj
+    const picojson::object& obj, std::optional<std::string> style_override
 ) {
   // json_schema is required.
   auto json_schema_it = obj.find("json_schema");
@@ -201,23 +202,21 @@ Result<JSONSchemaFormat, ISTError> StructuralTagParser::ParseJSONSchemaFormat(
         "JSON schema format must have a json_schema field with a object or boolean value"
     );
   }
-  // here introduces a serialization/deserialization overhead; try to avoid it in the future.
-  return ResultOk<JSONSchemaFormat>(json_schema_it->second.serialize(false));
-}
+  std::string style = "json";
+  if (style_override.has_value()) {
+    style = *style_override;
+  } else {
+    auto it = obj.find("style");
+    if (it != obj.end() && it->second.is<std::string>()) {
+      style = it->second.get<std::string>();
+    }
+  }
 
-Result<QwenXmlParameterFormat, ISTError> StructuralTagParser::ParseQwenXmlParameterFormat(
-    const picojson::object& obj
-) {
-  // json_schema is required.
-  auto json_schema_it = obj.find("json_schema");
-  if (json_schema_it == obj.end() ||
-      !(json_schema_it->second.is<picojson::object>() || json_schema_it->second.is<bool>())) {
-    return ResultErr<ISTError>(
-        "Qwen XML Parameter format must have a json_schema field with a object or boolean value"
-    );
+  if (style != "json" && style != "qwen_xml") {
+    return ResultErr<ISTError>("style must be \"json\" or \"qwen_xml\"");
   }
   // here introduces a serialization/deserialization overhead; try to avoid it in the future.
-  return ResultOk<QwenXmlParameterFormat>(json_schema_it->second.serialize(false));
+  return ResultOk<JSONSchemaFormat>(json_schema_it->second.serialize(false), style);
 }
 
 Result<AnyTextFormat, ISTError> StructuralTagParser::ParseAnyTextFormat(const picojson::object& obj
@@ -541,7 +540,6 @@ class StructuralTagAnalyzer {
   using FormatPtrVariant = std::variant<
       ConstStringFormat*,
       JSONSchemaFormat*,
-      QwenXmlParameterFormat*,
       AnyTextFormat*,
       GrammarFormat*,
       RegexFormat*,
@@ -560,7 +558,6 @@ class StructuralTagAnalyzer {
   // stack logics.
   std::optional<ISTError> VisitSub(ConstStringFormat* format);
   std::optional<ISTError> VisitSub(JSONSchemaFormat* format);
-  std::optional<ISTError> VisitSub(QwenXmlParameterFormat* format);
   std::optional<ISTError> VisitSub(AnyTextFormat* format);
   std::optional<ISTError> VisitSub(GrammarFormat* format);
   std::optional<ISTError> VisitSub(RegexFormat* format);
@@ -572,6 +569,7 @@ class StructuralTagAnalyzer {
 
   std::vector<std::string> DetectEndStrings();
   bool IsUnlimited(const Format& format);
+  bool IsExcluded(const Format& format);
 
   int visit_format_recursion_depth_ = 0;
   std::vector<FormatPtrVariant> stack_;
@@ -615,6 +613,24 @@ bool StructuralTagAnalyzer::IsUnlimited(const Format& format) {
   );
 }
 
+bool StructuralTagAnalyzer::IsExcluded(const Format& format) {
+  return std::visit(
+      [&](auto&& arg) -> bool {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, AnyTextFormat>) {
+          const auto& any_text_format = std::get<AnyTextFormat>(format);
+          return !any_text_format.excludes.empty();
+        } else if constexpr (std::is_same_v<T, TriggeredTagsFormat>) {
+          const auto& triggered_tags_format = std::get<TriggeredTagsFormat>(format);
+          return !triggered_tags_format.excludes.empty();
+        } else {
+          return false;
+        }
+      },
+      format
+  );
+}
+
 std::optional<ISTError> StructuralTagAnalyzer::Visit(Format* format) {
   FormatPtrVariant format_ptr_variant =
       std::visit([&](auto&& arg) -> FormatPtrVariant { return &arg; }, *format);
@@ -645,10 +661,6 @@ std::optional<ISTError> StructuralTagAnalyzer::VisitSub(JSONSchemaFormat* format
   return std::nullopt;
 }
 
-std::optional<ISTError> StructuralTagAnalyzer::VisitSub(QwenXmlParameterFormat* format) {
-  return std::nullopt;
-}
-
 std::optional<ISTError> StructuralTagAnalyzer::VisitSub(AnyTextFormat* format) {
   format->detected_end_strs_ = DetectEndStrings();
   return std::nullopt;
@@ -670,10 +682,12 @@ std::optional<ISTError> StructuralTagAnalyzer::VisitSub(SequenceFormat* format) 
       return err;
     }
     if (IsUnlimited(element)) {
-      return ISTError(
-          "Only the last element in a sequence can be unlimited, but the " + std::to_string(i) +
-          "th element of sequence format is unlimited"
-      );
+      if (!IsExcluded(element)) {
+        return ISTError(
+            "Only the last element in a sequence can be unlimited, but the " + std::to_string(i) +
+            "th element of sequence format is unlimited"
+        );
+      }
     }
   }
 
@@ -682,7 +696,7 @@ std::optional<ISTError> StructuralTagAnalyzer::VisitSub(SequenceFormat* format) 
   if (err.has_value()) {
     return err;
   }
-  format->is_unlimited_ = IsUnlimited(element);
+  format->is_unlimited_ = IsUnlimited(element) && !IsExcluded(element);
   return std::nullopt;
 }
 
@@ -694,7 +708,7 @@ std::optional<ISTError> StructuralTagAnalyzer::VisitSub(OrFormat* format) {
     if (err.has_value()) {
       return err;
     }
-    auto is_unlimited = IsUnlimited(element);
+    auto is_unlimited = IsUnlimited(element) && !IsExcluded(element);
     is_any_unlimited |= is_unlimited;
     is_all_unlimited &= is_unlimited;
   }
@@ -726,7 +740,11 @@ std::optional<ISTError> StructuralTagAnalyzer::VisitSub(TagFormat* format) {
       }
     }
     if (!has_non_empty) {
-      return ISTError("When the content is unlimited, at least one end string must be non-empty");
+      if (IsExcluded(*format->content)) {
+        return std::nullopt;
+      } else {
+        return ISTError("When the content is unlimited, at least one end string must be non-empty");
+      }
     }
     // Clear the end strings because they are moved to the detected_end_strs_ field.
     format->end.clear();
@@ -1000,7 +1018,6 @@ class StructuralTagGrammarConverter {
   Result<int, ISTError> Visit(const Format& format);
   Result<int, ISTError> VisitSub(const ConstStringFormat& format);
   Result<int, ISTError> VisitSub(const JSONSchemaFormat& format);
-  Result<int, ISTError> VisitSub(const QwenXmlParameterFormat& format);
   Result<int, ISTError> VisitSub(const AnyTextFormat& format);
   Result<int, ISTError> VisitSub(const GrammarFormat& format);
   Result<int, ISTError> VisitSub(const RegexFormat& format);
@@ -1077,14 +1094,9 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const ConstStringF
 }
 
 Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const JSONSchemaFormat& format) {
-  auto sub_grammar = Grammar::FromJSONSchema(format.json_schema);
-  auto added_root_rule_id = SubGrammarAdder().Apply(&grammar_builder_, sub_grammar);
-  return ResultOk(added_root_rule_id);
-}
-
-Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const QwenXmlParameterFormat& format
-) {
-  auto sub_grammar = Grammar::FromEBNF(QwenXMLToolCallingToEBNF(format.xml_schema));
+  Grammar sub_grammar = (format.style == "qwen_xml")
+                            ? Grammar::FromEBNF(QwenXMLToolCallingToEBNF(format.json_schema))
+                            : Grammar::FromJSONSchema(format.json_schema);
   auto added_root_rule_id = SubGrammarAdder().Apply(&grammar_builder_, sub_grammar);
   return ResultOk(added_root_rule_id);
 }
@@ -1290,7 +1302,12 @@ Result<int, ISTError> StructuralTagGrammarConverter::VisitSub(const AnyTextForma
         << "At least one detected end string must be non-empty";
     // TagDispatch supports multiple stop strings
     auto tag_dispatch_expr = grammar_builder_.AddTagDispatch(
-        Grammar::Impl::TagDispatch{{}, false, non_empty_ends, false, format.excluded_strs}
+        Grammar::Impl::TagDispatch{{}, false, non_empty_ends, false, format.excludes}
+    );
+    return ResultOk(grammar_builder_.AddRuleWithHint("any_text", tag_dispatch_expr));
+  } else if (format.excludes.size() > 0) {
+    auto tag_dispatch_expr = grammar_builder_.AddTagDispatch(
+        Grammar::Impl::TagDispatch{{}, true, {}, false, format.excludes}
     );
     return ResultOk(grammar_builder_.AddRuleWithHint("any_text", tag_dispatch_expr));
   } else {
@@ -1750,7 +1767,8 @@ Result<Grammar, StructuralTagError> StructuralTagToGrammar(const std::string& st
   if (result.IsErr()) {
     return ResultErr(std::move(result).UnwrapErr());
   }
-  return ResultOk(GrammarNormalizer::Apply(std::move(result).Unwrap()));
+  auto unwrapped_result = std::move(result).Unwrap();
+  return ResultOk(GrammarNormalizer::Apply(std::move(unwrapped_result)));
 }
 
 }  // namespace xgrammar

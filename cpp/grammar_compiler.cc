@@ -43,7 +43,7 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
       const std::unordered_map<int32_t, DynamicBitset>&
           tag_dispatch_rule_id_to_second_slicing_bitset,
       const TokenizerInfo& tokenizer_info,
-      CrossingCacheManager& crossing_cache_manager,
+      std::optional<RuleLevelCache>& rule_level_cache,
       const bool& need_expand = true
   )
       : EarleyParser(grammar, init_state),
@@ -52,7 +52,7 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
         tag_dispatch_rule_id_to_second_slicing_bitset_(tag_dispatch_rule_id_to_second_slicing_bitset
         ),
         tokenizer_info_(tokenizer_info),
-        crossing_cache_manager_(crossing_cache_manager) {}
+        rule_level_cache_(rule_level_cache) {}
   /*!
    * \brief Get the adaptive token mask for the given ParserState.
    * \param is_root_rule Whether to consider the parent rule. If false, there will be
@@ -65,17 +65,15 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
    * \param first_char_mask The first character mask.
    * \param is_root_rule Whether to consider the parent rule. If false, there will be
    * no uncertain tokens. Useful for the root rule.
-   * \param crossing_cache_is_available Whether the corssing-grammar caching is available.
    * \returns True if the rejected indices are filled as usual, False otherwise.
    * It's used to determine which construction function will be used.
    */
   bool GetTokenMaskWithFirstCharacterCheck(
-      const std::bitset<256>& first_char_mask, bool is_root_rule, bool crossing_cache_is_available
+      const std::bitset<256>& first_char_mask, bool is_root_rule
   );
 
   /*!
    * \brief Adapt the cache with lookahead assertion.
-   * \param
    * \param cache The adaptive token mask to be adapted.
    * \param is_root_rule Whether to consider the parent rule.
    */
@@ -120,7 +118,7 @@ class GrammarMatcherForTokenMaskCache : public EarleyParser {
 
   const TokenizerInfo& tokenizer_info_;
 
-  CrossingCacheManager& crossing_cache_manager_;
+  std::optional<RuleLevelCache> rule_level_cache_;
 
   // Temporary data for GetAdaptiveTokenMask.
   std::vector<int32_t> tmp_accepted_indices_;
@@ -205,13 +203,11 @@ void GrammarMatcherForTokenMaskCache::AdaptCacheWithLookahead(
         }
       }
 
+      XGRAMMAR_DCHECK(!tmp_can_reach_end_prefix_or_stack_.empty());
       bool can_reach_end = tmp_can_reach_end_prefix_or_stack_.back();
 
-      // All the tokens are at least uncertain!
-      XGRAMMAR_CHECK(!accepted);
-      if (accepted) {
-        tmp_accepted_indices_.push_back(uncertain_index);
-      } else if (can_reach_end && prev_matched_size > 0) {
+      XGRAMMAR_DCHECK(!accepted) << "All the tokens are at least uncertain!";
+      if (can_reach_end && prev_matched_size > 0) {
         auto [lookahead_accepted, lookahead_completed] =
             IsTokenPassLookaheadAssertion(token, tmp_can_reach_end_stack_);
         if ((!is_root_rule) && lookahead_accepted) {
@@ -232,7 +228,7 @@ void GrammarMatcherForTokenMaskCache::AdaptCacheWithLookahead(
   }
 
   // This strategy ensures the consistency of the cache storage type in most cases.
-  // However, in this case, the storage type is unconsistent:
+  // However, in this case, the storage type is inconsistent:
   // 1. The original cache is accepted_indices, and rejected_indices is also small.
   // After adapting with lookahead, |accepted_indices| + |accepted_by_lookahead_indices| >
   // |rejected_indices| + |rejected_by_lookahead_indices|, and |rejected_indices| +
@@ -241,7 +237,7 @@ void GrammarMatcherForTokenMaskCache::AdaptCacheWithLookahead(
   // 2. The original cache is rejected_indices, and accepted_indices is also small.
   // After adapting with lookahead, |accepted_indices| + |accepted_by_lookahead_indices| <
   // |rejected_indices| + |rejected_by_lookahead_indices|, and |accepted_indices| +
-  // |accepted_by_lookahead_indices| < AdaptiveiveTokenMask::USE_BITSET_THRESHOLD. In this case, it
+  // |accepted_by_lookahead_indices| < AdaptiveTokenMask::USE_BITSET_THRESHOLD. In this case, it
   // should be kAccepted, but ignored. These two cases are very rare in practice, and the impact is
   // very limited, so we ignore them for simplicity.
   cache.uncertain_indices = tmp_uncertain_indices_;
@@ -501,7 +497,7 @@ std::pair<bool, std::bitset<256>> GrammarMatcherForTokenMaskCache::GetSpeculativ
 }
 
 bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
-    const std::bitset<256>& first_char_mask, bool is_root_rule, bool crossing_cache_is_available
+    const std::bitset<256>& first_char_mask, bool is_root_rule
 ) {
   const auto& sorted_decoded_vocab = tokenizer_info_.GetSortedDecodedVocab();
   const auto& subtree_nodes_range = tokenizer_info_.GetTrieSubtreeNodesRange();
@@ -512,7 +508,6 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
 
   // Check if the type of the mask can be rejected.
   tmp_accepted_indices_.reserve(possible_token_num);
-  tmp_uncertain_indices_.reserve(possible_token_num);
   bool fill_reject_indices =
       (sorted_decoded_vocab.size() - possible_token_num) < AdaptiveTokenMask::USE_BITSET_THRESHOLD;
 
@@ -557,6 +552,12 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
       if (i < last_rejected_range) {
         if (fill_reject_indices) {
           tmp_rejected_indices_.push_back(i);
+          fill_reject_indices =
+              tmp_rejected_indices_.size() >= AdaptiveTokenMask::USE_BITSET_THRESHOLD
+                  ? false
+                  : fill_reject_indices;
+        } else {
+          i = last_rejected_range - 1;
         }
         continue;
       }
@@ -663,6 +664,10 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
       } else {
         tmp_rejected_indices_.push_back(i);
         last_rejected_range = subtree_nodes_range[i];
+        fill_reject_indices =
+            tmp_rejected_indices_.size() >= AdaptiveTokenMask::USE_BITSET_THRESHOLD
+                ? false
+                : fill_reject_indices;
       }
     }
     if (interval_idx != possible_intervals.size() - 1 && fill_reject_indices) {
@@ -670,6 +675,9 @@ bool GrammarMatcherForTokenMaskCache::GetTokenMaskWithFirstCharacterCheck(
       for (int i = interval.second; i < next_interval.first; ++i) {
         tmp_rejected_indices_.push_back(i);
       }
+      fill_reject_indices = tmp_rejected_indices_.size() >= AdaptiveTokenMask::USE_BITSET_THRESHOLD
+                                ? false
+                                : fill_reject_indices;
     }
   }
 
@@ -754,40 +762,40 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
   tmp_can_reach_end_prefix_or_stack_.push_back(false);
 
   // Try to get the crossing cache.
-  bool crossing_cache_is_available = crossing_cache_manager_.GetMaxSize() != 0 &&
-                                     grammar_->per_rule_fsm_hashes[init_rule_id_].has_value();
+  bool rule_level_cache_is_available =
+      rule_level_cache_.has_value() && grammar_->per_rule_fsm_hashes[init_rule_id_].has_value();
+  std::optional<uint64_t> fsm_hash = std::nullopt;
+  int32_t new_state_id = -1;
   std::optional<AdaptiveTokenMask> crossing_cache = std::nullopt;
-  const auto& original_to_new_id = grammar_->per_rule_fsm_new_state_ids[init_rule_id_];
-  uint64_t fsm_hash = -1;
-  uint32_t new_state_id = -1;
   int lookahead_id = grammar_->GetRule(initial_state_.rule_id).lookahead_assertion_id;
   bool is_exact_lookahead = grammar_->GetRule(initial_state_.rule_id).is_exact_lookahead;
   std::optional<uint64_t> lookahead_hash = std::nullopt;
-  if (crossing_cache_is_available) {
-    lookahead_hash = grammar_->HashSequence(lookahead_id);
+  if (rule_level_cache_is_available) {
+    lookahead_hash = GrammarFSMHasher::HashSequence(grammar_, lookahead_id);
+    const auto& original_to_new_id = grammar_->per_rule_fsm_new_state_ids[init_rule_id_];
     fsm_hash = grammar_->per_rule_fsm_hashes[init_rule_id_].value();
-    auto get_new_state_id = std::find_if(
-        original_to_new_id->begin(),
-        original_to_new_id->end(),
-        [&](const auto& original_new_pair) {
-          return original_new_pair.first == initial_state_.element_id;
-        }
-    );
-    XGRAMMAR_DCHECK(get_new_state_id != original_to_new_id->end());
-    new_state_id = get_new_state_id->second;
+    for (const auto& original_new_pair : original_to_new_id) {
+      if (original_new_pair.first == initial_state_.element_id) {
+        new_state_id = original_new_pair.second;
+        break;
+      }
+    }
+    XGRAMMAR_DCHECK(new_state_id != -1);
+    const auto& fsm = grammar_->per_rule_fsms[init_rule_id_].value();
     if (lookahead_hash.has_value()) {
-      crossing_cache = crossing_cache_manager_.GetCache(
-          HashCombine64Bits(fsm_hash, lookahead_hash.value(), is_exact_lookahead),
+      crossing_cache = rule_level_cache_->GetCache(
+          HashCombine(fsm_hash.value(), lookahead_hash.value(), is_exact_lookahead),
           new_state_id,
-          tokenizer_info_.GetTokenizerHash()
+          fsm.NumStates(),
+          fsm.GetNumEdges()
       );
       if (crossing_cache.has_value()) {
         // A perfect match.
         return crossing_cache.value();
       }
     }
-    crossing_cache = crossing_cache_manager_.GetCache(
-        fsm_hash, new_state_id, tokenizer_info_.GetTokenizerHash()
+    crossing_cache = rule_level_cache_->GetCache(
+        fsm_hash.value(), new_state_id, fsm.NumStates(), fsm.GetNumEdges()
     );
     // If the rule doesn't have a lookahead, then it is exactly the same fsm.
     if (crossing_cache.has_value()) {
@@ -795,12 +803,11 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
       return std::move(crossing_cache.value());
     }
   }
+
   std::bitset<256> first_character_mask;
   GetFirstCharacterMask(first_character_mask);
 
-  bool rejected_filled = GetTokenMaskWithFirstCharacterCheck(
-      first_character_mask, is_root_rule, crossing_cache_is_available
-  );
+  bool rejected_filled = GetTokenMaskWithFirstCharacterCheck(first_character_mask, is_root_rule);
   if (rejected_filled) {
     auto return_value = AdaptiveTokenMask(
         tokenizer_info_.GetVocabSize(),
@@ -809,11 +816,12 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
         tmp_rejected_indices_,
         tmp_uncertain_indices_
     );
-    if (crossing_cache_is_available) {
+    if (rule_level_cache_is_available) {
       if (lookahead_id == -1 && !is_root_rule) {
         // If the rule doesn't have a lookahead, then it is exactly the same fsm.
-        crossing_cache_manager_.AddCache(
-            fsm_hash, new_state_id, tokenizer_info_.GetTokenizerHash(), return_value
+        auto& fsm = grammar_->per_rule_fsms[init_rule_id_].value();
+        rule_level_cache_->AddCache(
+            fsm_hash.value(), new_state_id, fsm.NumStates(), fsm.GetNumEdges(), return_value
         );
         return return_value;
       }
@@ -844,10 +852,12 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
           tmp_accepted_by_lookahead_indices_.end(),
           std::back_inserter(accepted_indices_without_lookahead)
       );
-      crossing_cache_manager_.AddCache(
-          fsm_hash,
+      auto& fsm = grammar_->per_rule_fsms[init_rule_id_].value();
+      rule_level_cache_->AddCache(
+          fsm_hash.value(),
           new_state_id,
-          tokenizer_info_.GetTokenizerHash(),
+          fsm.NumStates(),
+          fsm.GetNumEdges(),
           AdaptiveTokenMask(
               tokenizer_info_.GetVocabSize(),
               tokenizer_info_.GetSortedDecodedVocab(),
@@ -857,10 +867,12 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
           )
       );
       if (lookahead_hash.has_value()) {
-        crossing_cache_manager_.AddCache(
-            HashCombine64Bits(fsm_hash, lookahead_hash.value(), is_exact_lookahead),
+        auto& fsm = grammar_->per_rule_fsms[init_rule_id_].value();
+        rule_level_cache_->AddCache(
+            HashCombine(fsm_hash.value(), lookahead_hash.value(), is_exact_lookahead),
             new_state_id,
-            tokenizer_info_.GetTokenizerHash(),
+            fsm.NumStates(),
+            fsm.GetNumEdges(),
             return_value
         );
       }
@@ -874,12 +886,13 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
         tmp_uncertain_indices_
     );
 
-    if (crossing_cache_is_available) {
+    if (rule_level_cache_is_available) {
       // Prepare for cache.
+      auto& fsm = grammar_->per_rule_fsms[init_rule_id_].value();
       if (lookahead_id == -1 && !is_root_rule) {
         // If the rule doesn't have a lookahead, then it is exactly the same fsm.
-        crossing_cache_manager_.AddCache(
-            fsm_hash, new_state_id, tokenizer_info_.GetTokenizerHash(), return_value
+        rule_level_cache_->AddCache(
+            fsm_hash.value(), new_state_id, fsm.NumStates(), fsm.GetNumEdges(), return_value
         );
         return return_value;
       }
@@ -898,10 +911,11 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
           tmp_accepted_by_lookahead_indices_.end(),
           std::back_inserter(accepted_indices_without_lookahead)
       );
-      crossing_cache_manager_.AddCache(
-          fsm_hash,
+      rule_level_cache_->AddCache(
+          fsm_hash.value(),
           new_state_id,
-          tokenizer_info_.GetTokenizerHash(),
+          fsm.NumStates(),
+          fsm.GetNumEdges(),
           AdaptiveTokenMask(
               tokenizer_info_.GetVocabSize(),
               tokenizer_info_.GetSortedDecodedVocab(),
@@ -911,10 +925,11 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
       );
 
       if (lookahead_hash.has_value()) {
-        crossing_cache_manager_.AddCache(
-            HashCombine64Bits(fsm_hash, lookahead_hash.value(), is_exact_lookahead),
+        rule_level_cache_->AddCache(
+            HashCombine(fsm_hash.value(), lookahead_hash.value(), is_exact_lookahead),
             new_state_id,
-            tokenizer_info_.GetTokenizerHash(),
+            fsm.NumStates(),
+            fsm.GetNumEdges(),
             return_value
         );
       }
@@ -928,16 +943,16 @@ AdaptiveTokenMask GrammarMatcherForTokenMaskCache::GetAdaptiveTokenMask(bool is_
 /*!
  * \brief The base class for the grammar compiler. Handles the compilation logic without cache.
  */
-class GrammarCompilerNoCache {
+class GrammarCompilerSub {
  public:
-  GrammarCompilerNoCache(
+  GrammarCompilerSub(
       const TokenizerInfo& tokenizer_info,
       int max_threads,
-      CrossingCacheManager& crossing_cache_manager
+      std::optional<RuleLevelCache> rule_level_cache
   )
       : tokenizer_info_(tokenizer_info),
         max_threads_(max_threads),
-        crossing_cache_manager_(crossing_cache_manager) {}
+        rule_level_cache_(rule_level_cache) {}
 
   CompiledGrammar CompileBuiltinJSONGrammar();
 
@@ -976,11 +991,11 @@ class GrammarCompilerNoCache {
   /*! \brief The maximum number of threads to use. */
   const int max_threads_;
 
-  /*! \brief The manager of the crossing grammar cache.*/
-  CrossingCacheManager& crossing_cache_manager_;
+  /*! \brief The manager of the rule level cache.*/
+  std::optional<RuleLevelCache> rule_level_cache_;
 };
 
-CompiledGrammar GrammarCompilerNoCache::MultiThreadCompileGrammar(Grammar grammar_unoptimized) {
+CompiledGrammar GrammarCompilerSub::MultiThreadCompileGrammar(Grammar grammar_unoptimized) {
   using GrammarExprType = Grammar::Impl::GrammarExprType;
 
   auto compiled_grammar_impl = std::make_shared<CompiledGrammar::Impl>();
@@ -994,7 +1009,7 @@ CompiledGrammar GrammarCompilerNoCache::MultiThreadCompileGrammar(Grammar gramma
   TagDispatchOptimization(compiled_grammar_impl, &tag_dispatch_rule_id_to_second_slicing_bitset);
 
   // If the compiler is cache-enabled, then we hash the grammars for crossing-grammar caching.
-  if (crossing_cache_manager_.GetMaxSize() != 0) {
+  if (rule_level_cache_.has_value()) {
     GrammarFSMHasher().Apply(&compiled_grammar_impl->grammar);
   }
   // Step 3. Compute the adaptive token mask cache
@@ -1019,7 +1034,7 @@ CompiledGrammar GrammarCompilerNoCache::MultiThreadCompileGrammar(Grammar gramma
         state,
         tag_dispatch_rule_id_to_second_slicing_bitset,
         tokenizer_info_,
-        crossing_cache_manager_,
+        rule_level_cache_,
         false
     );
     auto cur_adaptive_token_mask_cache = grammar_matcher.GetAdaptiveTokenMask(is_root_rule);
@@ -1103,11 +1118,11 @@ CompiledGrammar GrammarCompilerNoCache::MultiThreadCompileGrammar(Grammar gramma
   return CompiledGrammar(compiled_grammar_impl);
 }
 
-CompiledGrammar GrammarCompilerNoCache::CompileBuiltinJSONGrammar() {
+CompiledGrammar GrammarCompilerSub::CompileBuiltinJSONGrammar() {
   return MultiThreadCompileGrammar(Grammar::BuiltinJSONGrammar());
 }
 
-CompiledGrammar GrammarCompilerNoCache::CompileJSONSchema(
+CompiledGrammar GrammarCompilerSub::CompileJSONSchema(
     const std::string& schema,
     bool any_whitespace,
     std::optional<int> indent,
@@ -1120,29 +1135,28 @@ CompiledGrammar GrammarCompilerNoCache::CompileJSONSchema(
   ));
 }
 
-CompiledGrammar GrammarCompilerNoCache::CompileStructuralTag(const std::string& structural_tag_json
-) {
+CompiledGrammar GrammarCompilerSub::CompileStructuralTag(const std::string& structural_tag_json) {
   auto result = Grammar::FromStructuralTag(structural_tag_json);
   XGRAMMAR_CHECK(std::holds_alternative<Grammar>(result))
       << GetMessageFromVariantError(std::get<1>(result));
   return MultiThreadCompileGrammar(std::get<0>(result));
 }
 
-CompiledGrammar GrammarCompilerNoCache::CompileRegex(const std::string& regex) {
+CompiledGrammar GrammarCompilerSub::CompileRegex(const std::string& regex) {
   return MultiThreadCompileGrammar(Grammar::FromRegex(regex));
 }
 
-CompiledGrammar GrammarCompilerNoCache::CompileGrammar(const Grammar& grammar) {
+CompiledGrammar GrammarCompilerSub::CompileGrammar(const Grammar& grammar) {
   return MultiThreadCompileGrammar(grammar);
 }
 
-CompiledGrammar GrammarCompilerNoCache::CompileGrammar(
+CompiledGrammar GrammarCompilerSub::CompileGrammar(
     const std::string& ebnf_str, std::string root_rule_name
 ) {
   return MultiThreadCompileGrammar(Grammar::FromEBNF(ebnf_str, root_rule_name));
 }
 
-void GrammarCompilerNoCache::TagDispatchOptimization(
+void GrammarCompilerSub::TagDispatchOptimization(
     std::shared_ptr<CompiledGrammar::Impl> compiled_grammar_impl,
     std::unordered_map<int32_t, DynamicBitset>* tag_dispatch_rule_id_to_second_slicing_bitset
 ) {
@@ -1297,16 +1311,21 @@ class GrammarCompiler::Impl {
       bool cache_enabled,
       int64_t max_memory_bytes
   )
-      : no_cache_compiler_(tokenizer_info, max_threads, crossing_cache_manager_),
-        cache_enabled_(cache_enabled),
-        compile_cache_(
+      : cache_enabled_(cache_enabled),
+        rule_level_cache_(
+            cache_enabled
+                ? std::optional<RuleLevelCache>(
+                      max_memory_bytes == -1
+                          ? static_cast<std::size_t>(-1)
+                          : static_cast<std::size_t>(max_memory_bytes - max_memory_bytes / 3 * 2)
+                  )
+                : std::nullopt
+        ),
+        no_cache_compiler_(tokenizer_info, max_threads, rule_level_cache_),
+        grammar_level_cache_(
             max_memory_bytes == -1 ? static_cast<std::size_t>(-1)
                                    : static_cast<std::size_t>(max_memory_bytes / 3 * 2),
             Computer(*this)
-        ),
-        crossing_cache_manager_(
-            max_memory_bytes == -1 ? static_cast<std::size_t>(-1)
-                                   : static_cast<std::size_t>(max_memory_bytes / 3)
         ) {
     if (max_memory_bytes < -1) {
       XGRAMMAR_LOG(FATAL) << "Invalid max_memory_bytes: " << max_memory_bytes << ". "
@@ -1360,17 +1379,17 @@ class GrammarCompiler::Impl {
     std::size_t operator()(const CompiledGrammar& value) const { return value.MemorySizeBytes(); }
   };
 
-  /*! \brief The no cache compiler. */
-  GrammarCompilerNoCache no_cache_compiler_;
-
   /*! \brief Whether the cache is enabled. */
   const bool cache_enabled_;
 
-  /*! \brief The cache for compiled grammars. */
-  ThreadSafeLRUCache<UnionKey, CompiledGrammar, Computer, SizeEstimator> compile_cache_;
-
   /*! \brief The crossing cache manager for compiled grammars. */
-  CrossingCacheManager crossing_cache_manager_;
+  std::optional<RuleLevelCache> rule_level_cache_ = std::nullopt;
+
+  /*! \brief The no cache compiler. */
+  GrammarCompilerSub no_cache_compiler_;
+
+  /*! \brief The cache for compiled grammars. */
+  ThreadSafeLRUCache<UnionKey, CompiledGrammar, Computer, SizeEstimator> grammar_level_cache_;
 };
 
 CompiledGrammar GrammarCompiler::Impl::Compute(const UnionKey& key) {
@@ -1406,7 +1425,7 @@ CompiledGrammar GrammarCompiler::Impl::CompileBuiltinJSONGrammar() {
   if (!cache_enabled_) {
     return no_cache_compiler_.CompileBuiltinJSONGrammar();
   }
-  return compile_cache_.Get(BuiltinJSONGrammarKey{});
+  return grammar_level_cache_.Get(BuiltinJSONGrammarKey{});
 }
 
 CompiledGrammar GrammarCompiler::Impl::CompileJSONSchema(
@@ -1422,7 +1441,7 @@ CompiledGrammar GrammarCompiler::Impl::CompileJSONSchema(
         schema, any_whitespace, indent, separators, strict_mode, max_whitespace_cnt
     );
   }
-  return compile_cache_.Get(
+  return grammar_level_cache_.Get(
       SchemaKey{schema, any_whitespace, indent, separators, strict_mode, max_whitespace_cnt}
   );
 }
@@ -1432,21 +1451,21 @@ CompiledGrammar GrammarCompiler::Impl::CompileStructuralTag(const std::string& s
   if (!cache_enabled_) {
     return no_cache_compiler_.CompileStructuralTag(structural_tag_json);
   }
-  return compile_cache_.Get(StructuralTagKey{structural_tag_json});
+  return grammar_level_cache_.Get(StructuralTagKey{structural_tag_json});
 }
 
 CompiledGrammar GrammarCompiler::Impl::CompileRegex(const std::string& regex) {
   if (!cache_enabled_) {
     return no_cache_compiler_.CompileRegex(regex);
   }
-  return compile_cache_.Get(RegexKey{regex});
+  return grammar_level_cache_.Get(RegexKey{regex});
 }
 
 CompiledGrammar GrammarCompiler::Impl::CompileGrammar(const Grammar& grammar) {
   if (!cache_enabled_) {
     return no_cache_compiler_.CompileGrammar(grammar);
   }
-  return compile_cache_.Get(GrammarKey{grammar.ToString(), grammar->GetRootRule().name});
+  return grammar_level_cache_.Get(GrammarKey{grammar.ToString(), grammar->GetRootRule().name});
 }
 
 CompiledGrammar GrammarCompiler::Impl::CompileGrammar(
@@ -1455,23 +1474,27 @@ CompiledGrammar GrammarCompiler::Impl::CompileGrammar(
   if (!cache_enabled_) {
     return no_cache_compiler_.CompileGrammar(ebnf_str, root_rule_name);
   }
-  return compile_cache_.Get(GrammarKey{ebnf_str, root_rule_name});
+  return grammar_level_cache_.Get(GrammarKey{ebnf_str, root_rule_name});
 }
 
 void GrammarCompiler::Impl::ClearCache() {
-  compile_cache_.Clear();
-  crossing_cache_manager_.ClearCache();
+  grammar_level_cache_.Clear();
+  if (rule_level_cache_.has_value()) {
+    rule_level_cache_->ClearCache();
+  }
 }
 
 int64_t GrammarCompiler::Impl::GetCacheSizeBytes() const {
-  return static_cast<int64_t>(compile_cache_.MemorySize()) +
-         static_cast<int64_t>(MemorySize(crossing_cache_manager_));
+  return static_cast<int64_t>(grammar_level_cache_.MemorySize()) +
+         static_cast<int64_t>(MemorySize(rule_level_cache_));
 }
 
 int64_t GrammarCompiler::Impl::CacheLimitBytes() const {
-  const auto size = compile_cache_.MaxMemorySize();
-  if (size == compile_cache_.kUnlimitedSize) return -1;
-  return static_cast<int64_t>(size) + static_cast<int64_t>(crossing_cache_manager_.GetMaxSize());
+  const auto size = grammar_level_cache_.MaxMemorySize();
+  if (size == grammar_level_cache_.kUnlimitedSize) return -1;
+  return static_cast<int64_t>(size) + (rule_level_cache_.has_value()
+                                           ? static_cast<int64_t>(rule_level_cache_->GetMaxSize())
+                                           : 0);
 }
 
 /******************* GrammarCompiler *******************/

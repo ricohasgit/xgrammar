@@ -10,8 +10,7 @@
 #include <xgrammar/xgrammar.h>
 
 #include <cstddef>
-#include <list>
-#include <mutex>
+#include <cstdint>
 #include <string>
 
 #include "compiled_grammar_impl.h"
@@ -383,12 +382,21 @@ class GrammarOptimizer {
 };
 
 /*!
+ * \brief Rename the root rule of the grammar to "root".
+ */
+class RootRuleRenamer {
+ public:
+  static Grammar Apply(const Grammar& grammar);
+};
+
+/*!
  * \brief Hash the fsms in the grammar,
  * and get the new state ids of each fsm's states.
  */
 class GrammarFSMHasher {
  public:
   static void Apply(Grammar* grammar);
+  static std::optional<uint64_t> HashSequence(const Grammar& grammar, int32_t sequence_id);
 };
 
 /*!
@@ -396,74 +404,39 @@ class GrammarFSMHasher {
  * \param max_cache_size The maximum size of the cache numbers.
  * \details LRU algorithm is implemented.
  */
-class CrossingCacheManager {
+class RuleLevelCache {
  public:
   static const size_t kUnlimitedSize = static_cast<size_t>(-1);
 
   std::optional<AdaptiveTokenMask> GetCache(
-      const uint64_t& fsm_hash, int32_t fsm_new_node_id, const uint64_t& tokenizer_hash
+      const uint64_t& fsm_hash,
+      int32_t fsm_new_node_id,
+      const int32_t& state_cnt,
+      const int32_t edge_cnt
   );
   bool AddCache(
       const uint64_t& fsm_hash,
       int32_t fsm_new_node_id,
-      const uint64_t& tokenizer_hash,
+      const int32_t& state_cnt,
+      const int32_t edge_cnt,
       const AdaptiveTokenMask& token_mask
   );
   bool AddCache(
       const uint64_t& fsm_hash,
       int32_t fsm_new_node_id,
-      const uint64_t& tokenizer_hash,
+      const int32_t& state_cnt,
+      const int32_t edge_cnt,
       AdaptiveTokenMask&& token_mask
   );
-  CrossingCacheManager(size_t max_cache_memory_size = kUnlimitedSize)
-      : crossing_cache_manager_impl_(max_cache_memory_size) {}
+  RuleLevelCache(size_t max_cache_memory_size = kUnlimitedSize);
 
   void ClearCache();
 
-  size_t GetMaxSize() const { return crossing_cache_manager_impl_.GetMaxSize(); }
+  size_t GetMaxSize() const;
 
-  friend size_t MemorySize(const CrossingCacheManager& manager) {
-    return MemorySize(manager.crossing_cache_manager_impl_);
-  }
+  friend size_t MemorySize(const RuleLevelCache& manager);
 
- private:
-  class CrossingCacheManagerImpl {
-   public:
-    std::optional<AdaptiveTokenMask> GetCache(
-        const uint64_t& fsm_hash, int32_t fsm_new_node_id, const uint64_t& tokenizer_hash
-    );
-    bool AddCache(
-        const uint64_t& fsm_hash,
-        int32_t fsm_new_node_id,
-        const uint64_t& tokenizer_hash,
-        const AdaptiveTokenMask& token_mask
-    );
-    bool AddCache(
-        const uint64_t& fsm_hash,
-        int32_t fsm_new_node_id,
-        const uint64_t& tokenizer_hash,
-        AdaptiveTokenMask&& token_mask
-    );
-    CrossingCacheManagerImpl(size_t max_cache_memory_size = 1e7)
-        : max_cache_memory_size_(max_cache_memory_size) {}
-
-    void ClearCache();
-
-    size_t GetMaxSize() const { return max_cache_memory_size_; }
-
-    friend size_t MemorySize(const CrossingCacheManagerImpl& manager) {
-      return manager.current_cache_memory_size_;
-    }
-
-   private:
-    std::mutex mutex_;
-    const size_t max_cache_memory_size_;
-    int64_t current_cache_memory_size_ = 0;
-    std::list<std::pair<std::tuple<uint64_t, int32_t, uint64_t>, AdaptiveTokenMask>> cache_list_;
-    std::unordered_map<std::tuple<uint64_t, int32_t, uint64_t>, decltype(cache_list_.begin())>
-        cache_;
-  };
-  CrossingCacheManagerImpl crossing_cache_manager_impl_;
+  XGRAMMAR_DEFINE_PIMPL_METHODS(RuleLevelCache);
 };
 
 }  // namespace xgrammar
